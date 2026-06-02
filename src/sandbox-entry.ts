@@ -485,7 +485,7 @@ export function createPlugin() {
 					await ctx.storage.sessions.put(sessionId, {
 						id: sessionId, ip, createdAt: now, lastActivity: now,
 						turnCount: 0, status: "active",
-						messages: [], collected: {},
+						collected: {},
 					});
 					await trackAnalytic("widget_opened", ip, sessionId, ctx);
 					const token = await signSessionToken(sessionId, settings.sessionSecret);
@@ -547,7 +547,6 @@ export function createPlugin() {
 					const photoData = {
 						mediaId: objectKey,
 						url: photoUrl,
-						altTextAi: "",
 						altTextFinal: "",
 						filename: body.filename,
 						contentType,

@@ -1,12 +1,6 @@
-export interface ConversationMessage {
-	role: "user" | "assistant";
-	content: string;
-}
-
 export interface PhotoData {
 	mediaId: string;
 	url: string;
-	altTextAi: string;
 	altTextFinal: string;
 	filename: string;
 	contentType: string;
@@ -27,9 +21,6 @@ export interface CollectedData {
 	copyrightTimestamp?: string;
 	ageConfirmed?: boolean;
 	newsletterSignup?: boolean;
-	eeatFirstHand?: boolean;
-	eeatConnection?: string;
-	eeatSources?: string;
 }
 
 export interface InferredTaxonomy {
@@ -50,7 +41,6 @@ export interface Session {
 	lastActivity: string;
 	turnCount: number;
 	status: "active" | "completed" | "expired" | "spam";
-	messages: ConversationMessage[];
 	collected: CollectedData;
 }
 
