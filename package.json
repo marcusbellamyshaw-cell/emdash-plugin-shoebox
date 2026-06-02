@@ -1,5 +1,5 @@
 {
-  "name": "ebt-plugin-shoebox",
+  "name": "emdash-plugin-shoebox",
   "version": "1.0.0",
   "type": "module",
   "exports": {

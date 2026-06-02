@@ -1,4 +1,4 @@
-# ebt-plugin-shoebox
+# emdash-plugin-shoebox
 
 A community photo and story submission plugin for [Emdash CMS](https://emdashcms.com). Powers the "From the Shoebox" feature on [Every Bit Texas](https://everybittexas.com) — a public submission form where visitors share old Texas photos and family memories. Submissions land in the Emdash admin as draft posts for editorial review, with one-click approve/reject and automatic email notifications via Brevo.
 
@@ -77,6 +77,12 @@ Configure via the **Shoebox Settings** page in the Emdash admin panel. All value
 - Emdash `^0.16.0`
 - Cloudflare R2 (photos), D1 (submissions/analytics), KV (sessions/settings)
 - Brevo account (transactional email and newsletter)
+
+## About
+
+Community photo and story submission plugin for EmDash CMS. Designed by Marcus Shaw for [Every Bit Texas](https://everybittexas.com). Coded by [Claude Code](https://claude.ai/code).
+
+Built for [EmDash CMS](https://github.com/emdash-cms/emdash) — star the repo to support open-source CMS development.
 
 ## License
 

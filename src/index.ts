@@ -6,7 +6,7 @@ export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
 		version: "1.0.0",
-		entrypoint: "ebt-plugin-shoebox",
+		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [
 			"content:read",
@@ -33,7 +33,7 @@ export function shoeboxPlugin(): PluginDescriptor {
 				indexes: ["event", "date", ["event", "date"]],
 			},
 		},
-		adminEntry: "ebt-plugin-shoebox/admin",
+		adminEntry: "emdash-plugin-shoebox/admin",
 		adminPages: [
 			{ path: "/settings", label: "Shoebox Settings", icon: "gear" },
 			{ path: "/submissions", label: "Review Submissions", icon: "inbox" },
