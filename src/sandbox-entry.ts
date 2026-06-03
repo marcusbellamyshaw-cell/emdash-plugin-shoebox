@@ -1,4 +1,4 @@
-import { definePlugin, PluginRouteError } from "emdash";
+import { definePlugin, PluginRouteError, ulid } from "emdash";
 import type { PluginContext, RouteContext } from "emdash";
 import type {
 	Session,
@@ -7,6 +7,53 @@ import type {
 	PluginSettings,
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
+
+// ─── R2 media helpers ─────────────────────────────────────────────────────────
+// ctx.media.upload() is unavailable for native plugins using R2 Worker binding —
+// emdash gates MediaAccessWithWrite behind getUploadUrl which R2 binding doesn't
+// provide (presigned URLs are unsupported). We replicate bridge.mediaUpload directly.
+
+const FILE_EXT_REGEX = /^\.[a-z0-9]{1,10}$/i;
+
+type R2BucketMinimal = {
+	put(key: string, value: Uint8Array, opts?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+	delete(key: string): Promise<void>;
+};
+
+// Indirection prevents Vite from statically analyzing this import at build time
+// (sandbox-entry.ts is loaded in Node.js during config; cloudflare:workers is
+// Workers-runtime-only). Using a variable instead of a string literal bypasses
+// Vite's static import resolver — the module is only imported at request time.
+const _CF_WORKERS = "cloudflare:workers";
+
+async function getMediaBucket(): Promise<R2BucketMinimal | null> {
+	try {
+		const { env } = await import(/* @vite-ignore */ _CF_WORKERS) as { env: Record<string, unknown> };
+		return (env["MEDIA"] as R2BucketMinimal | undefined) ?? null;
+	} catch {
+		return null;
+	}
+}
+
+async function uploadPhotoToR2(
+	filename: string,
+	contentType: string,
+	bytes: ArrayBuffer,
+): Promise<{ storageKey: string; url: string }> {
+	const bucket = await getMediaBucket();
+	if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Photo storage is not available. Please contact support.", 503);
+	const basename = filename.split("/").pop() ?? filename;
+	const rawExt = basename.includes(".") ? basename.slice(basename.lastIndexOf(".")).toLowerCase() : "";
+	const ext = FILE_EXT_REGEX.test(rawExt) ? rawExt : "";
+	const storageKey = `${ulid()}${ext}`;
+	await bucket.put(storageKey, new Uint8Array(bytes), { httpMetadata: { contentType } });
+	return { storageKey, url: `/_emdash/api/media/file/${storageKey}` };
+}
+
+async function deletePhotoFromR2(storageKey: string): Promise<void> {
+	const bucket = await getMediaBucket();
+	if (bucket) await bucket.delete(storageKey).catch(() => {});
+}
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
@@ -432,13 +479,7 @@ export function createPlugin() {
 						throw PluginRouteError.badRequest(`Maximum ${settings.maxPhotos ?? 5} photos per submission.`);
 					}
 
-					const mediaCtx = ctx.media as {
-						upload?(filename: string, ct: string, b: ArrayBuffer): Promise<{ mediaId: string; storageKey: string; url: string }>;
-					} | undefined;
-					if (typeof mediaCtx?.upload !== "function") {
-						throw new PluginRouteError("CONFIG_ERROR", "Photo storage is not available. Please contact support.", 503);
-					}
-					const { mediaId, url: photoUrl } = await mediaCtx.upload(body.filename, contentType, arrayBuffer);
+					const { storageKey: mediaId, url: photoUrl } = await uploadPhotoToR2(body.filename, contentType, arrayBuffer);
 
 					const photoData = {
 						mediaId,
@@ -477,10 +518,7 @@ export function createPlugin() {
 					if (body.mediaId) {
 						session.collected.photos = (session.collected.photos ?? []).filter((p) => p.mediaId !== body.mediaId);
 						await ctx.storage.sessions.put(sessionId, session);
-						const delCtx = ctx.media as { delete?(id: string): Promise<boolean> } | undefined;
-						if (typeof delCtx?.delete === "function") {
-							await delCtx.delete(body.mediaId).catch(() => {});
-						}
+						await deletePhotoFromR2(body.mediaId);
 					}
 
 					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
@@ -724,14 +762,11 @@ export function createPlugin() {
 						catch (err) { ctx.log.warn(`[ebt-shoebox] ${err}`); }
 					}
 					if (submission.photos?.length) {
-						const delCtx = ctx.media as { delete?(id: string): Promise<boolean> } | undefined;
-						if (typeof delCtx?.delete === "function") {
-							await Promise.all(
-								submission.photos
-									.filter((p) => p.mediaId)
-									.map((p) => delCtx.delete!(p.mediaId).catch(() => {})),
-							);
-						}
+						await Promise.all(
+							submission.photos
+								.filter((p) => p.mediaId)
+								.map((p) => deletePhotoFromR2(p.mediaId)),
+						);
 					}
 					return { ok: true, id: body.id, status: "rejected" };
 				},
