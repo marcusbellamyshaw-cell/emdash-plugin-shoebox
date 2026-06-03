@@ -78,11 +78,6 @@ export interface AnalyticsEvent {
 
 export interface PluginSettings {
 	enabled: boolean;
-	cfAccountId: string;
-	r2AccessKeyId: string;
-	r2SecretAccessKey: string;
-	r2BucketName: string;
-	r2PublicUrl: string;
 	brevoApiKey: string;
 	newsletterEnabled: boolean;
 	maxFileSize: number;
@@ -94,11 +89,6 @@ export interface PluginSettings {
 
 export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
-	cfAccountId: "",
-	r2AccessKeyId: "",
-	r2SecretAccessKey: "",
-	r2BucketName: "",
-	r2PublicUrl: "",
 	brevoApiKey: "",
 	newsletterEnabled: true,
 	maxFileSize: 10,

@@ -5,11 +5,6 @@ const API = "/_emdash/api/plugins/ebt-shoebox";
 
 interface SettingsValues {
 	enabled: boolean;
-	cfAccountId: string;
-	r2AccessKeyId: string;
-	r2SecretAccessKey: string;
-	r2BucketName: string;
-	r2PublicUrl: string;
 	brevoApiKey: string;
 	newsletterEnabled: boolean;
 	maxFileSize: number;
@@ -20,11 +15,6 @@ interface SettingsValues {
 
 const DEFAULTS: SettingsValues = {
 	enabled: true,
-	cfAccountId: "",
-	r2AccessKeyId: "",
-	r2SecretAccessKey: "",
-	r2BucketName: "",
-	r2PublicUrl: "",
 	brevoApiKey: "",
 	newsletterEnabled: true,
 	maxFileSize: 10,
@@ -95,22 +85,6 @@ export function Settings() {
 
 			<Section title="General">
 				<Toggle label="Plugin enabled" checked={values.enabled} onChange={(v) => set("enabled", v)} />
-			</Section>
-
-			<Section title="R2 Photo Storage">
-				<p style={helpStyle}>
-					Photos are uploaded directly to Cloudflare R2. Your Account ID is in the right sidebar at{" "}
-					<strong>dash.cloudflare.com</strong>. Create an R2 API token at{" "}
-					<strong>R2 → Manage R2 API Tokens</strong> with <em>Object Read &amp; Write</em> permission scoped to your bucket.
-				</p>
-				<Field label="Cloudflare Account ID" value={values.cfAccountId} onChange={(v) => set("cfAccountId", v)}
-					hint="Found in the right sidebar at dash.cloudflare.com" />
-				<Field label="R2 Access Key ID" value={values.r2AccessKeyId} onChange={(v) => set("r2AccessKeyId", v)} />
-				<Field label="R2 Secret Access Key" value={values.r2SecretAccessKey} onChange={(v) => set("r2SecretAccessKey", v)} secret />
-				<Field label="Bucket Name" value={values.r2BucketName} onChange={(v) => set("r2BucketName", v)}
-					hint="Name of the R2 bucket (must be in the same Cloudflare account)" />
-				<Field label="Public URL" value={values.r2PublicUrl} onChange={(v) => set("r2PublicUrl", v)}
-					hint="Base URL for public photo access, e.g. https://media.everybittexas.com or your r2.dev domain" />
 			</Section>
 
 			<Section title="Newsletter (Brevo)">

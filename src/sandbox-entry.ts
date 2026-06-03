@@ -77,116 +77,6 @@ async function computeHash(text: string): Promise<string> {
 		.slice(0, 32);
 }
 
-// ─── R2 direct upload (AWS Sig V4) ───────────────────────────────────────────
-
-async function sha256Hex(data: string | ArrayBuffer): Promise<string> {
-	const buf: BufferSource = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
-	const hashBuf = await crypto.subtle.digest("SHA-256", buf);
-	return Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function hmacSha256(key: ArrayBuffer, message: string): Promise<ArrayBuffer> {
-	const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	return crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(message));
-}
-
-async function r2Upload(
-	objectKey: string,
-	contentType: string,
-	bytes: ArrayBuffer,
-	settings: PluginSettings,
-): Promise<string> {
-	const { cfAccountId, r2AccessKeyId, r2SecretAccessKey, r2BucketName, r2PublicUrl } = settings;
-	if (!cfAccountId || !r2AccessKeyId || !r2SecretAccessKey || !r2BucketName) {
-		throw new PluginRouteError("CONFIG_MISSING", "R2 storage not configured. Add R2 credentials in Shoebox Settings.", 503);
-	}
-
-	const now = new Date();
-	const pad = (n: number) => String(n).padStart(2, "0");
-	const dateStamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-	const amzDate = `${dateStamp}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
-
-	const host = `${cfAccountId}.r2.cloudflarestorage.com`;
-	const canonicalUri = `/${r2BucketName}/${objectKey}`;
-	const bodyHash = await sha256Hex(bytes);
-	const canonicalHeaders = `content-type:${contentType}\nhost:${host}\nx-amz-content-sha256:${bodyHash}\nx-amz-date:${amzDate}\n`;
-	const signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date";
-	const canonicalRequest = `PUT\n${canonicalUri}\n\n${canonicalHeaders}\n${signedHeaders}\n${bodyHash}`;
-	const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
-	const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${await sha256Hex(canonicalRequest)}`;
-
-	const kDate = await hmacSha256(new TextEncoder().encode(`AWS4${r2SecretAccessKey}`).buffer, dateStamp);
-	const kRegion = await hmacSha256(kDate, "auto");
-	const kService = await hmacSha256(kRegion, "s3");
-	const kSigning = await hmacSha256(kService, "aws4_request");
-	const sigBuf = await hmacSha256(kSigning, stringToSign);
-	const signature = Array.from(new Uint8Array(sigBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-	// 30-second upload timeout — large images could stall the Worker indefinitely
-	// without this. A failed upload surfaces as a 502 to the submitter.
-	const uploadCtrl = new AbortController();
-	const uploadTid = setTimeout(() => uploadCtrl.abort(), 30_000);
-	const res = await globalThis.fetch(`https://${host}${canonicalUri}`, {
-		method: "PUT",
-		headers: {
-			"Content-Type": contentType,
-			"x-amz-date": amzDate,
-			"x-amz-content-sha256": bodyHash,
-			"Authorization": `AWS4-HMAC-SHA256 Credential=${r2AccessKeyId}/${credentialScope},SignedHeaders=${signedHeaders},Signature=${signature}`,
-		},
-		body: bytes,
-		signal: uploadCtrl.signal,
-	}).finally(() => clearTimeout(uploadTid));
-
-	if (!res.ok) {
-		const errText = await res.text().catch(() => "");
-		console.warn(`[ebt-shoebox] R2 upload failed ${res.status}: ${errText}`);
-		throw new PluginRouteError("UPLOAD_FAILED", `Photo upload failed (${res.status}). Check R2 credentials.`, 502);
-	}
-
-	const baseUrl = r2PublicUrl ? r2PublicUrl.replace(/\/$/, "") : `https://${host}/${r2BucketName}`;
-	return `${baseUrl}/${objectKey}`;
-}
-
-async function r2Delete(objectKey: string, settings: PluginSettings): Promise<void> {
-	const { cfAccountId, r2AccessKeyId, r2SecretAccessKey, r2BucketName } = settings;
-	if (!cfAccountId || !r2AccessKeyId || !r2SecretAccessKey || !r2BucketName) return;
-
-	const now = new Date();
-	const pad = (n: number) => String(n).padStart(2, "0");
-	const dateStamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-	const amzDate = `${dateStamp}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
-
-	const host = `${cfAccountId}.r2.cloudflarestorage.com`;
-	const canonicalUri = `/${r2BucketName}/${objectKey}`;
-	const bodyHash = await sha256Hex("");
-	const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${bodyHash}\nx-amz-date:${amzDate}\n`;
-	const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
-	const canonicalRequest = `DELETE\n${canonicalUri}\n\n${canonicalHeaders}\n${signedHeaders}\n${bodyHash}`;
-	const credentialScope = `${dateStamp}/auto/s3/aws4_request`;
-	const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${await sha256Hex(canonicalRequest)}`;
-
-	const kDate = await hmacSha256(new TextEncoder().encode(`AWS4${r2SecretAccessKey}`).buffer, dateStamp);
-	const kRegion = await hmacSha256(kDate, "auto");
-	const kService = await hmacSha256(kRegion, "s3");
-	const kSigning = await hmacSha256(kService, "aws4_request");
-	const sigBuf = await hmacSha256(kSigning, stringToSign);
-	const signature = Array.from(new Uint8Array(sigBuf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-	try {
-		await globalThis.fetch(`https://${host}${canonicalUri}`, {
-			method: "DELETE",
-			headers: {
-				"x-amz-date": amzDate,
-				"x-amz-content-sha256": bodyHash,
-				"Authorization": `AWS4-HMAC-SHA256 Credential=${r2AccessKeyId}/${credentialScope},SignedHeaders=${signedHeaders},Signature=${signature}`,
-			},
-		});
-	} catch (err) {
-		console.warn(`[ebt-shoebox] R2 delete failed for ${objectKey}: ${err}`);
-	}
-}
-
 // ─── Rate limit ───────────────────────────────────────────────────────────────
 
 async function checkSubmissionRateLimit(ip: string, settings: PluginSettings, ctx: PluginContext): Promise<boolean> {
@@ -369,11 +259,6 @@ export function createPlugin() {
 			widgets: [{ id: "shoebox-stats", title: "Shoebox Submissions", size: "third" }],
 			settingsSchema: {
 				enabled: { type: "boolean", label: "Enable Plugin", default: true },
-				cfAccountId: { type: "string", label: "Cloudflare Account ID", description: "Right sidebar at dash.cloudflare.com" },
-				r2AccessKeyId: { type: "string", label: "R2 Access Key ID", description: "dash.cloudflare.com → R2 → Manage R2 API Tokens" },
-				r2SecretAccessKey: { type: "secret", label: "R2 Secret Access Key" },
-				r2BucketName: { type: "string", label: "R2 Bucket Name" },
-				r2PublicUrl: { type: "string", label: "R2 Public URL", description: "Public base URL, e.g. https://media.everybittexas.com" },
 				brevoApiKey: { type: "secret", label: "Brevo API Key", description: "Brevo dashboard → Settings → API Keys" },
 				newsletterEnabled: { type: "boolean", label: "Enable Newsletter Opt-in", default: true },
 				maxFileSize: { type: "number", label: "Max File Size (MB)", default: 10, min: 1, max: 50 },
@@ -392,7 +277,9 @@ export function createPlugin() {
 					await ctx.kv.set("settings:maxPhotos", 5);
 					await ctx.kv.set("settings:maxSubmissionsPerIp", 3);
 					await ctx.kv.set("settings:maxStoryWords", 2000);
-					const secret = Array.from(crypto.getRandomValues(new Uint8Array(32))).map((b) => b.toString(16).padStart(2, "0")).join("");
+					const secret = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+						.map((b) => b.toString(16).padStart(2, "0"))
+						.join("");
 					await ctx.kv.set("settings:sessionSecret", secret);
 					ctx.log.info("[ebt-shoebox] Plugin installed");
 				},
@@ -413,10 +300,12 @@ export function createPlugin() {
 						: "https://everybittexas.com/from-the-shoebox";
 
 					// Back-fill SEO if not already set (catches submissions made before this fix)
-					if (name && e.content?.id && ctx.content?.update) {
+					if (e.content?.id && ctx.content?.update) {
 						try {
 							const existingSeo = (e.content as unknown as { seo?: { title?: string } })?.seo;
 							if (!existingSeo?.title) {
+								const creditPref = data.credit_preference as string | undefined;
+								const isNamed = creditPref === "named";
 								const ptBlocks = (data.story_original as Array<{ children?: Array<{ text?: string }> }> | undefined) ?? [];
 								const plainStory = ptBlocks
 									.flatMap((b) => b.children ?? [])
@@ -428,9 +317,12 @@ export function createPlugin() {
 									? plainStory.slice(0, 160).replace(/\s+\S*$/, "") + "…"
 									: plainStory;
 								const photos = (data.photos as Array<{ url?: string }> | undefined) ?? [];
+								const seoTitle = isNamed && name
+									? `${name}'s Texas Memory: ${location}`
+									: `A Texas Memory — ${location}`;
 								await ctx.content.update("community_submissions", e.content.id, {
 									seo: {
-										title: `${name}'s Texas Memory: ${location}`,
+										title: seoTitle,
 										description: seoDescription || undefined,
 										image: photos[0]?.url ?? null,
 									},
@@ -489,7 +381,7 @@ export function createPlugin() {
 					});
 					await trackAnalytic("widget_opened", ip, sessionId, ctx);
 					const token = await signSessionToken(sessionId, settings.sessionSecret);
-					return { ok: true, sessionToken: token };
+					return { ok: true, sessionToken: token, maxPhotos: settings.maxPhotos ?? 5 };
 				},
 			},
 
@@ -529,7 +421,7 @@ export function createPlugin() {
 					} catch {
 						throw PluginRouteError.badRequest("Invalid image data. Please try uploading the photo again.");
 					}
-					const arrayBuffer = bytes.buffer;
+					const arrayBuffer = bytes.buffer as ArrayBuffer;
 
 					if (arrayBuffer.byteLength > (settings.maxFileSize ?? 10) * 1024 * 1024) {
 						throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
@@ -540,12 +432,16 @@ export function createPlugin() {
 						throw PluginRouteError.badRequest(`Maximum ${settings.maxPhotos ?? 5} photos per submission.`);
 					}
 
-					const ext = (body.filename.split(".").pop() ?? "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
-					const objectKey = `shoebox/${sessionId}/${crypto.randomUUID()}.${ext}`;
-					const photoUrl = await r2Upload(objectKey, contentType, arrayBuffer, settings);
+					const mediaCtx = ctx.media as {
+						upload?(filename: string, ct: string, b: ArrayBuffer): Promise<{ mediaId: string; storageKey: string; url: string }>;
+					} | undefined;
+					if (typeof mediaCtx?.upload !== "function") {
+						throw new PluginRouteError("CONFIG_ERROR", "Photo storage is not available. Please contact support.", 503);
+					}
+					const { mediaId, url: photoUrl } = await mediaCtx.upload(body.filename, contentType, arrayBuffer);
 
 					const photoData = {
-						mediaId: objectKey,
+						mediaId,
 						url: photoUrl,
 						altTextFinal: "",
 						filename: body.filename,
@@ -581,7 +477,10 @@ export function createPlugin() {
 					if (body.mediaId) {
 						session.collected.photos = (session.collected.photos ?? []).filter((p) => p.mediaId !== body.mediaId);
 						await ctx.storage.sessions.put(sessionId, session);
-						try { await r2Delete(body.mediaId, settings); } catch { /* non-fatal */ }
+						const delCtx = ctx.media as { delete?(id: string): Promise<boolean> } | undefined;
+						if (typeof delCtx?.delete === "function") {
+							await delCtx.delete(body.mediaId).catch(() => {});
+						}
 					}
 
 					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
@@ -654,8 +553,13 @@ export function createPlugin() {
 
 					const now = new Date().toISOString();
 
+					const creditPref = body.creditPreference ?? "anonymous";
+					const isNamed = creditPref === "named";
+
 					// Build SEO from submission data so it's pre-populated in the admin
-					const seoTitle = `${name}'s Texas Memory: ${location}`;
+					const seoTitle = isNamed
+						? `${name}'s Texas Memory: ${location}`
+						: `A Texas Memory — ${location}`;
 					const plainStory = story.replace(/\s+/g, " ").trim();
 					const seoDescription = plainStory.length > 160
 						? plainStory.slice(0, 160).replace(/\s+\S*$/, "") + "…"
@@ -663,15 +567,18 @@ export function createPlugin() {
 					const firstPhotoUrl = (session.collected.photos ?? [])[0]?.url ?? null;
 					const seo = { title: seoTitle, description: seoDescription, image: firstPhotoUrl };
 
+					// Public title: omit submitter name for anonymous credits
+					const entryTitle = isNamed ? `${name} — ${location}` : `A Texas Memory — ${location}`;
+
 					let emdashContentId: string | undefined;
 					try {
 						if (ctx.content?.create) {
 							const entry = await ctx.content.create("community_submissions", {
-								title: `${name} — ${location}`,
+								title: entryTitle,
 								story_original: textToPortableText(story),
 								submitter_name: name,
 								submitter_email: body.email ?? "",
-								credit_preference: body.creditPreference ?? "anonymous",
+								credit_preference: creditPref,
 								approx_date: body.era ?? "",
 								location,
 								photos: session.collected.photos ?? [],
@@ -726,11 +633,6 @@ export function createPlugin() {
 					const s = await getSettings(ctx);
 					return {
 						enabled: s.enabled,
-						cfAccountId: s.cfAccountId ?? "",
-						r2AccessKeyId: s.r2AccessKeyId ?? "",
-						r2SecretAccessKey: s.r2SecretAccessKey ? "••••••••" : "",
-						r2BucketName: s.r2BucketName ?? "",
-						r2PublicUrl: s.r2PublicUrl ?? "",
 						brevoApiKey: s.brevoApiKey ? "••••••••" : "",
 						newsletterEnabled: s.newsletterEnabled,
 						maxFileSize: s.maxFileSize ?? 10,
@@ -751,11 +653,6 @@ export function createPlugin() {
 					};
 					await Promise.all([
 						save("enabled", body.enabled),
-						save("cfAccountId", body.cfAccountId),
-						save("r2AccessKeyId", body.r2AccessKeyId),
-						save("r2SecretAccessKey", body.r2SecretAccessKey),
-						save("r2BucketName", body.r2BucketName),
-						save("r2PublicUrl", body.r2PublicUrl),
 						save("brevoApiKey", body.brevoApiKey),
 						save("newsletterEnabled", body.newsletterEnabled),
 						body.maxFileSize != null ? ctx.kv.set("settings:maxFileSize", Number(body.maxFileSize)) : Promise.resolve(),
@@ -794,7 +691,7 @@ export function createPlugin() {
 					const submission = await ctx.storage.submissions.get(id) as SubmissionRecord | null;
 					if (!submission) throw PluginRouteError.notFound("Submission not found");
 					const session = await ctx.storage.sessions.get(submission.sessionId) as Session | null;
-					return { id, ...submission, collected: session?.collected ?? {}, conversation: session?.messages ?? [] };
+					return { id, ...submission, collected: session?.collected ?? {}, conversation: (session as { messages?: unknown[] } | null)?.messages ?? [] };
 				},
 			},
 
@@ -827,12 +724,14 @@ export function createPlugin() {
 						catch (err) { ctx.log.warn(`[ebt-shoebox] ${err}`); }
 					}
 					if (submission.photos?.length) {
-						const settings = await getSettings(ctx);
-						await Promise.all(
-							submission.photos
-								.filter((p) => p.mediaId)
-								.map((p) => r2Delete(p.mediaId, settings)),
-						);
+						const delCtx = ctx.media as { delete?(id: string): Promise<boolean> } | undefined;
+						if (typeof delCtx?.delete === "function") {
+							await Promise.all(
+								submission.photos
+									.filter((p) => p.mediaId)
+									.map((p) => delCtx.delete!(p.mediaId).catch(() => {})),
+							);
+						}
 					}
 					return { ok: true, id: body.id, status: "rejected" };
 				},
