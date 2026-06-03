@@ -335,6 +335,10 @@ export function createPlugin() {
 			"content:afterPublish": {
 				errorPolicy: "continue",
 				handler: async (event: unknown, ctx: PluginContext) => {
+					// Flush the site's cached category counts so post counts update immediately.
+					const invalidate = (globalThis as unknown as Record<string, unknown>).__ebt_invalidateCategoryCache;
+					if (typeof invalidate === "function") (invalidate as () => void)();
+
 					const e = event as { content?: { id?: string; data?: Record<string, unknown> }; collection?: string };
 					if (e.collection !== "community_submissions") return;
 					const data = e.content?.data ?? {};
