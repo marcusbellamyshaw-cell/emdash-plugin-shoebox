@@ -364,9 +364,11 @@ export function createPlugin() {
 									? plainStory.slice(0, 160).replace(/\s+\S*$/, "") + "…"
 									: plainStory;
 								const photos = (data.photos as Array<{ url?: string }> | undefined) ?? [];
+								const locSuffix = location ? `: ${location}` : "";
+								const locDash = location ? ` — ${location}` : "";
 								const seoTitle = isNamed && name
-									? `${name}'s Texas Memory: ${location}`
-									: `A Texas Memory — ${location}`;
+									? `${name}'s Texas Memory${locSuffix}`
+									: `A Texas Memory${locDash}`;
 								await ctx.content.update("community_submissions", e.content.id, {
 									seo: {
 										title: seoTitle,
@@ -559,11 +561,11 @@ export function createPlugin() {
 
 					const story = (body.story ?? "").trim();
 					const name = (body.name ?? "").trim();
-					const location = (body.location ?? "").trim();
+					const locationRaw = body.location;
+					const location = (typeof locationRaw === "string" ? locationRaw : "").trim();
 
 					if (!story) throw PluginRouteError.badRequest("Please tell us your story.");
 					if (!name) throw PluginRouteError.badRequest("Please include your name.");
-					if (!location) throw PluginRouteError.badRequest("Please include a location.");
 					if (!body.consentCopyright) throw PluginRouteError.badRequest("Please confirm you have rights to share these photos.");
 					if (!body.consentAge) throw PluginRouteError.badRequest("Please confirm you are 18 or older.");
 
@@ -595,9 +597,11 @@ export function createPlugin() {
 					const isNamed = creditPref === "named";
 
 					// Build SEO from submission data so it's pre-populated in the admin
+					const locationSuffix = location ? `: ${location}` : "";
+					const locationDash = location ? ` — ${location}` : "";
 					const seoTitle = isNamed
-						? `${name}'s Texas Memory: ${location}`
-						: `A Texas Memory — ${location}`;
+						? `${name}'s Texas Memory${locationSuffix}`
+						: `A Texas Memory${locationDash}`;
 					const plainStory = story.replace(/\s+/g, " ").trim();
 					const seoDescription = plainStory.length > 160
 						? plainStory.slice(0, 160).replace(/\s+\S*$/, "") + "…"
@@ -606,7 +610,7 @@ export function createPlugin() {
 					const seo = { title: seoTitle, description: seoDescription, image: firstPhotoUrl };
 
 					// Public title: omit submitter name for anonymous credits
-					const entryTitle = isNamed ? `${name} — ${location}` : `A Texas Memory — ${location}`;
+					const entryTitle = isNamed ? `${name}${locationDash}` : `A Texas Memory${locationDash}`;
 
 					let emdashContentId: string | undefined;
 					try {
