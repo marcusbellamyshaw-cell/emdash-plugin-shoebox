@@ -1,6 +1,6 @@
 {
   "name": "emdash-plugin-shoebox",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -8,7 +8,7 @@
     "./admin": "./src/admin.tsx"
   },
   "peerDependencies": {
-    "emdash": "^0.16.0",
+    "emdash": ">=0.16.0",
     "react": "^19.0.0"
   },
   "devDependencies": {
