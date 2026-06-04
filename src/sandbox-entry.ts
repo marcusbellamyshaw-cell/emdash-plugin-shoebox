@@ -537,9 +537,6 @@ export function createPlugin() {
 					const body = ctx.input as {
 						sessionToken?: string;
 						story?: string;
-						location?: string;
-						era?: string;
-						categories?: string[];
 						name?: string;
 						email?: string;
 						phone?: string;
@@ -561,9 +558,6 @@ export function createPlugin() {
 
 					const story = (body.story ?? "").trim();
 					const name = (body.name ?? "").trim();
-					const locationRaw = body.location;
-					const location = (typeof locationRaw === "string" ? locationRaw : "").trim();
-
 					if (!story) throw PluginRouteError.badRequest("Please tell us your story.");
 					if (!name) throw PluginRouteError.badRequest("Please include your name.");
 					if (!body.consentCopyright) throw PluginRouteError.badRequest("Please confirm you have rights to share these photos.");
@@ -583,9 +577,7 @@ export function createPlugin() {
 					if (dupeCheck.items.length > 0) throw PluginRouteError.conflict("A very similar story has already been submitted.");
 
 					const taxonomy: InferredTaxonomy = {
-						categories: body.categories ?? [],
-						eras: body.era ? [body.era] : [],
-						tags: [], regions: [], people: [],
+						categories: [], eras: [], tags: [], regions: [], people: [],
 						content_types: (session.collected.photos?.length ?? 0) > 0 ? ["photo", "story"] : ["story"],
 						counties: [],
 						confidence: 1.0,
@@ -597,11 +589,7 @@ export function createPlugin() {
 					const isNamed = creditPref === "named";
 
 					// Build SEO from submission data so it's pre-populated in the admin
-					const locationSuffix = location ? `: ${location}` : "";
-					const locationDash = location ? ` — ${location}` : "";
-					const seoTitle = isNamed
-						? `${name}'s Texas Memory${locationSuffix}`
-						: `A Texas Memory${locationDash}`;
+					const seoTitle = isNamed ? `${name}'s Texas Memory` : "A Texas Memory";
 					const plainStory = story.replace(/\s+/g, " ").trim();
 					const seoDescription = plainStory.length > 160
 						? plainStory.slice(0, 160).replace(/\s+\S*$/, "") + "…"
@@ -610,7 +598,7 @@ export function createPlugin() {
 					const seo = { title: seoTitle, description: seoDescription, image: firstPhotoUrl };
 
 					// Public title: omit submitter name for anonymous credits
-					const entryTitle = isNamed ? `${name}${locationDash}` : `A Texas Memory${locationDash}`;
+					const entryTitle = isNamed ? name : "A Texas Memory";
 
 					let emdashContentId: string | undefined;
 					try {
@@ -621,8 +609,6 @@ export function createPlugin() {
 								submitter_name: name,
 								submitter_email: body.email ?? "",
 								credit_preference: creditPref,
-								approx_date: body.era ?? "",
-								location,
 								photos: session.collected.photos ?? [],
 								review_status: "pending",
 								consent_given: true,
@@ -645,8 +631,8 @@ export function createPlugin() {
 					await ctx.storage.submissions.put(submissionId, {
 						sessionId, ip, status: "pending", createdAt: now, updatedAt: now,
 						textHash, imageHashes: [], emdashContentId,
-						title: `${name} — ${location}`,
-						submitterName: name, submitterEmail: body.email ?? "", location,
+						title: entryTitle,
+						submitterName: name, submitterEmail: body.email ?? "",
 						photoCount: session.collected.photos?.length ?? 0,
 						photos: session.collected.photos ?? [],
 						taxonomyConfidence: 1.0, taxonomyTags: taxonomy,
