@@ -553,7 +553,7 @@ export function createPlugin() {
 					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
 
 					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
-					if (!session || session.ip !== ip) throw PluginRouteError.notFound("Session not found.");
+					if (!session) throw PluginRouteError.notFound("Session not found.");
 					if (session.status === "completed") throw PluginRouteError.conflict("This story has already been submitted. Refresh the page to start a new submission.");
 
 					const story = (body.story ?? "").trim();
