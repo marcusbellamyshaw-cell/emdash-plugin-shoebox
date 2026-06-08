@@ -121,7 +121,20 @@ export function Queue() {
 	};
 
 	return (
-		<div style={{ display: "flex", gap: 24, minHeight: 500, position: "relative" }}>
+		<div className="sbs-queue-root" style={{ display: "flex", gap: 24, minHeight: 500, position: "relative" }}>
+			<style>{`
+				@media (max-width: 640px) {
+					.sbs-queue-root { flex-direction: column !important; gap: 16px !important; }
+					.sbs-queue-list { width: 100% !important; }
+					.sbs-queue-list--hidden { display: none !important; }
+					.sbs-queue-detail { min-width: 0 !important; }
+					.sbs-detail-header { flex-direction: column !important; align-items: flex-start !important; gap: 12px !important; }
+					.sbs-detail-actions { width: 100% !important; }
+					.sbs-detail-actions button { flex: 1 !important; }
+					.sbs-meta-grid { grid-template-columns: 1fr !important; }
+					.sbs-photo-grid img { width: 100px !important; height: 75px !important; }
+				}
+			`}</style>
 			{/* Toast */}
 			{toast && (
 				<div
@@ -144,7 +157,7 @@ export function Queue() {
 			)}
 
 			{/* Left: submission list */}
-			<div style={{ width: 340, flexShrink: 0 }}>
+			<div className={`sbs-queue-list${selected ? " sbs-queue-list--hidden" : ""}`} style={{ width: 340, flexShrink: 0 }}>
 				{/* Filter tabs */}
 				<div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
 					{(["pending", "approved", "rejected", "all"] as const).map((s) => (
@@ -218,7 +231,7 @@ export function Queue() {
 			</div>
 
 			{/* Right: detail panel */}
-			<div style={{ flex: 1, minWidth: 0 }}>
+			<div className="sbs-queue-detail" style={{ flex: 1, minWidth: 0 }}>
 				{detailLoading ? (
 					<div style={{ color: "var(--kumo-subtle, #6b7280)", padding: "24px 0" }}>Loading…</div>
 				) : selected ? (
@@ -295,7 +308,7 @@ function SubmissionDetailPanel({
 				← Back to list
 			</button>
 
-			<div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+			<div className="sbs-detail-header" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
 				<div>
 					<h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>{submission.title}</h2>
 					<div style={{ fontSize: 13, color: "var(--kumo-subtle, #6b7280)", marginTop: 4 }}>
@@ -326,7 +339,7 @@ function SubmissionDetailPanel({
 					)}
 				</div>
 				{submission.status === "pending" && (
-					<div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+					<div className="sbs-detail-actions" style={{ display: "flex", gap: 8, flexShrink: 0 }}>
 						<button
 							type="button"
 							onClick={onApprove}
@@ -392,7 +405,7 @@ function SubmissionDetailPanel({
 			)}
 
 			{/* Meta grid */}
-			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+			<div className="sbs-meta-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
 				<MetaField label="Submitter" value={submission.submitterName} />
 				<MetaField label="Email" value={submission.submitterEmail ?? ""} />
 				<MetaField label="Location" value={submission.location} />
@@ -402,7 +415,7 @@ function SubmissionDetailPanel({
 			{/* Photos */}
 			{photos.length > 0 && (
 				<Section title="Photos">
-					<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+					<div className="sbs-photo-grid" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
 						{photos.map((photo, i) => (
 							<div key={i} style={{ width: 120 }}>
 								<img
