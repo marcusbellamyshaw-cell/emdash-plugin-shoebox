@@ -6,12 +6,12 @@ A community photo and story submission plugin for [Emdash CMS](https://emdashcms
 
 - Public submission form with photo upload (up to 5 photos, 10 MB each — JPG, PNG, WebP)
 - Structured draft posts saved to a **Community Submission** content type in Emdash, reviewable in the admin
-- **One-click approve** → publishes the post and emails the submitter a confirmation
-- **Reject** → sends a configurable warm rejection email
+- **One-click approve** → publishes the post; the confirmation email is sent to the submitter when you click Publish in Emdash
+- **Reject** → marks the submission rejected and removes its photos (no email is sent to the submitter; the optional reason is internal context for the team)
 - Category tagging from submitter checkbox selections
 - Brevo integration: optional newsletter signup collected at submission time
-- Session tokens with HMAC signing; per-IP rate limiting (submissions and turns)
-- Submission funnel analytics stored in D1 (widget opened / started / completed)
+- Session tokens with HMAC signing; per-IP rate limiting on submissions
+- Submission funnel analytics stored in D1 (widget opened / completed)
 - Admin dashboard widget showing submission counts
 - All API keys and settings stored in Cloudflare KV — nothing hardcoded
 
@@ -42,24 +42,23 @@ Configure via the **Shoebox Settings** page in the Emdash admin panel. All value
 
 | Setting | Description |
 |---|---|
-| Brevo API key | For confirmation and rejection emails |
-| Brevo newsletter list ID | For optional newsletter signup |
-| Confirmation email sender name / address | Shown on emails sent to submitters |
-| R2 Access Key ID + Secret Access Key | For photo uploads to R2 (separate R2 API token) |
-| R2 bucket name + public URL | Where photos are stored |
+| Plugin enabled toggle | Disable the form without removing the plugin |
+| Brevo API key | For the approval confirmation email and newsletter signup |
+| Newsletter signup toggle | Show or hide the newsletter question |
+| Brevo newsletter list ID (default 3) | Which Brevo list newsletter opt-ins are added to |
 | Max file size (default 10 MB) | Per photo limit |
 | Max photos per submission (default 5) | |
 | Max submissions per IP per 24 h (default 3) | |
 | Max story word count (default 2,000) | |
-| Plugin enabled toggle | Disable the form without removing the plugin |
-| Newsletter signup toggle | Show or hide the newsletter question |
+
+> Photos are stored via the bound `MEDIA` R2 binding (no R2 keys to configure), and the confirmation email sender is currently `Every Bit Texas <hello@everybittexas.com>`.
 
 ## Admin routes
 
 | Route | Description |
 |---|---|
-| `POST /submissions/approve` | Publishes the draft post and emails the submitter |
-| `POST /submissions/reject` | Sends rejection email and marks the submission |
+| `POST /submissions/approve` | Marks the submission approved (the confirmation email is sent on Publish) |
+| `POST /submissions/reject` | Marks the submission rejected and deletes its photos (no email sent) |
 | `GET /submissions/list` | Lists pending submissions for the review queue |
 | `GET /settings/get` / `POST /settings/update` | Read and update plugin settings |
 

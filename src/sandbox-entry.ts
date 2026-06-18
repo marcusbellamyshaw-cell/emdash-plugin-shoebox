@@ -156,7 +156,7 @@ async function signUpForNewsletter(email: string, name: string, phone: string | 
 		await globalThis.fetch("https://api.brevo.com/v3/contacts", {
 			method: "POST",
 			headers: { "api-key": settings.brevoApiKey, "Content-Type": "application/json" },
-			body: JSON.stringify({ email, attributes, listIds: [3], updateEnabled: true }),
+			body: JSON.stringify({ email, attributes, listIds: [settings.brevoListId ?? 3], updateEnabled: true }),
 			signal: ctrl.signal,
 		}).finally(() => clearTimeout(tid));
 	} catch { /* non-fatal */ }
@@ -242,17 +242,39 @@ function getIP(ctx: RouteContext): string {
 	);
 }
 
+// Exact-host allowlist for the public, state-changing routes (init/upload/
+// removePhoto/submit). Browsers always send an Origin header on cross-origin
+// POST fetches, so we require it and parse the host instead of substring-
+// matching (which accepted everybittexas.com.evil.com). A missing Origin is no
+// longer treated as valid — that previously let any non-browser client through.
+const ALLOWED_ORIGIN_HOSTS = new Set(["everybittexas.com", "www.everybittexas.com"]);
+
+function hostAllowed(value: string): boolean {
+	try {
+		const host = new URL(value).host.toLowerCase();
+		return (
+			ALLOWED_ORIGIN_HOSTS.has(host) ||
+			host === "localhost" ||
+			host.startsWith("localhost:") ||
+			host.endsWith(".localhost")
+		);
+	} catch {
+		return false;
+	}
+}
+
 function validateOrigin(request: Request): boolean {
-	const origin = request.headers.get("Origin") ?? "";
-	const referer = request.headers.get("Referer") ?? "";
-	return (
-		origin.includes("everybittexas.com") || referer.includes("everybittexas.com") ||
-		origin.includes("localhost") || referer.includes("localhost") || origin === ""
-	);
+	const origin = request.headers.get("Origin");
+	if (origin) return hostAllowed(origin);
+	// No Origin header (rare for a POST fetch): fall back to Referer, parsed the
+	// same way. Never treat a missing Origin as automatically valid.
+	const referer = request.headers.get("Referer");
+	if (referer) return hostAllowed(referer);
+	return false;
 }
 
 async function trackAnalytic(
-	event: "widget_opened" | "conversation_started" | "submission_completed",
+	event: "widget_opened" | "submission_completed",
 	ip: string,
 	sessionId: string | undefined,
 	ctx: PluginContext,
@@ -280,16 +302,20 @@ let _fragmentsEnabledExpiry = 0;
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.0.0",
+		version: "1.1.0",
 		capabilities: [
 			"content:read",
 			"content:write",
 			"media:read",
 			"media:write",
-			"network:request:unrestricted",
+			// Only api.brevo.com is ever fetched (R2 is reached via the MEDIA
+			// Worker binding, not HTTP), so an explicit allowlist replaces the
+			// previous network:request:unrestricted grant.
+			"network:request",
 			"email:send",
 			"hooks.page-fragments:register",
 		],
+		allowedHosts: ["api.brevo.com"],
 
 		storage: {
 			sessions: { indexes: ["ip", "status", "createdAt", ["ip", "status"]] },
@@ -308,6 +334,7 @@ export function createPlugin() {
 				enabled: { type: "boolean", label: "Enable Plugin", default: true },
 				brevoApiKey: { type: "secret", label: "Brevo API Key", description: "Brevo dashboard → Settings → API Keys" },
 				newsletterEnabled: { type: "boolean", label: "Enable Newsletter Opt-in", default: true },
+				brevoListId: { type: "number", label: "Brevo Newsletter List ID", default: 3, min: 1 },
 				maxFileSize: { type: "number", label: "Max File Size (MB)", default: 10, min: 1, max: 50 },
 				maxPhotos: { type: "number", label: "Max Photos per Submission", default: 5, min: 1, max: 10 },
 				maxSubmissionsPerIp: { type: "number", label: "Max Submissions per IP per 24h", default: 3, min: 1, max: 20 },
@@ -455,13 +482,20 @@ export function createPlugin() {
 					}
 
 					const settings = await getSettings(ctx);
-					const ip = getIP(ctx);
 					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
 					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
 
 					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
 					if (!session || session.status !== "active") {
 						throw PluginRouteError.notFound("Session not found.");
+					}
+
+					const maxBytes = (settings.maxFileSize ?? 10) * 1024 * 1024;
+					// Reject oversized uploads from the encoded length BEFORE decoding,
+					// so a malicious client can't force atob() over an arbitrarily large
+					// base64 payload on this public route. (~3/4 of the base64 length.)
+					if (Math.floor((body.data.length * 3) / 4) > maxBytes) {
+						throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
 					}
 
 					let bytes: Uint8Array;
@@ -472,7 +506,7 @@ export function createPlugin() {
 					}
 					const arrayBuffer = bytes.buffer as ArrayBuffer;
 
-					if (arrayBuffer.byteLength > (settings.maxFileSize ?? 10) * 1024 * 1024) {
+					if (arrayBuffer.byteLength > maxBytes) {
 						throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
 					}
 
@@ -508,7 +542,6 @@ export function createPlugin() {
 					const body = ctx.input as { sessionToken?: string; mediaId?: string };
 
 					const settings = await getSettings(ctx);
-					const ip = getIP(ctx);
 					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
 					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
 
@@ -540,6 +573,7 @@ export function createPlugin() {
 						name?: string;
 						email?: string;
 						phone?: string;
+						location?: string;
 						creditPreference?: "named" | "anonymous";
 						newsletterSignup?: boolean;
 						consentCopyright?: boolean;
@@ -558,6 +592,7 @@ export function createPlugin() {
 
 					const story = (body.story ?? "").trim();
 					const name = (body.name ?? "").trim();
+					const location = (body.location ?? "").trim();
 					if (!story) throw PluginRouteError.badRequest("Please tell us your story.");
 					if (!name) throw PluginRouteError.badRequest("Please include your name.");
 					if (!body.consentCopyright) throw PluginRouteError.badRequest("Please confirm you have rights to share these photos.");
@@ -608,6 +643,7 @@ export function createPlugin() {
 								story_original: textToPortableText(story),
 								submitter_name: name,
 								submitter_email: body.email ?? "",
+								location,
 								credit_preference: creditPref,
 								photos: session.collected.photos ?? [],
 								review_status: "pending",
@@ -633,6 +669,7 @@ export function createPlugin() {
 						textHash, imageHashes: [], emdashContentId,
 						title: entryTitle,
 						submitterName: name, submitterEmail: body.email ?? "",
+						location,
 						photoCount: session.collected.photos?.length ?? 0,
 						photos: session.collected.photos ?? [],
 						taxonomyConfidence: 1.0, taxonomyTags: taxonomy,
@@ -650,7 +687,10 @@ export function createPlugin() {
 					return { ok: true, submissionId };
 					} catch (err) {
 						if (err instanceof PluginRouteError) throw err;
-						throw new PluginRouteError("INTERNAL_DEBUG", `form/submit error: ${String(err)}`, 500);
+						// Log details server-side; never return raw error text to the
+						// public caller (this was leaking internals via INTERNAL_DEBUG).
+						ctx.log.error(`[ebt-shoebox] form/submit error: ${String(err)}`);
+						throw new PluginRouteError("INTERNAL_ERROR", "Something went wrong submitting your story. Please try again.", 500);
 					}
 				},
 			},
@@ -663,6 +703,7 @@ export function createPlugin() {
 						enabled: s.enabled,
 						brevoApiKey: s.brevoApiKey ? "••••••••" : "",
 						newsletterEnabled: s.newsletterEnabled,
+						brevoListId: s.brevoListId ?? 3,
 						maxFileSize: s.maxFileSize ?? 10,
 						maxPhotos: s.maxPhotos ?? 5,
 						maxSubmissionsPerIp: s.maxSubmissionsPerIp ?? 3,
@@ -683,6 +724,7 @@ export function createPlugin() {
 						save("enabled", body.enabled),
 						save("brevoApiKey", body.brevoApiKey),
 						save("newsletterEnabled", body.newsletterEnabled),
+						body.brevoListId != null ? ctx.kv.set("settings:brevoListId", Number(body.brevoListId)) : Promise.resolve(),
 						body.maxFileSize != null ? ctx.kv.set("settings:maxFileSize", Number(body.maxFileSize)) : Promise.resolve(),
 						body.maxPhotos != null ? ctx.kv.set("settings:maxPhotos", Number(body.maxPhotos)) : Promise.resolve(),
 						body.maxSubmissionsPerIp != null ? ctx.kv.set("settings:maxSubmissionsPerIp", Number(body.maxSubmissionsPerIp)) : Promise.resolve(),
@@ -719,7 +761,7 @@ export function createPlugin() {
 					const submission = await ctx.storage.submissions.get(id) as SubmissionRecord | null;
 					if (!submission) throw PluginRouteError.notFound("Submission not found");
 					const session = await ctx.storage.sessions.get(submission.sessionId) as Session | null;
-					return { id, ...submission, collected: session?.collected ?? {}, conversation: (session as { messages?: unknown[] } | null)?.messages ?? [] };
+					return { id, ...submission, collected: session?.collected ?? {} };
 				},
 			},
 
@@ -764,13 +806,12 @@ export function createPlugin() {
 
 			"analytics/stats": {
 				handler: async (ctx: RouteContext) => {
-					const [opened, started, completed, pending] = await Promise.all([
+					const [opened, completed, pending] = await Promise.all([
 						ctx.storage.analytics.count({ event: "widget_opened" }),
-						ctx.storage.analytics.count({ event: "conversation_started" }),
 						ctx.storage.analytics.count({ event: "submission_completed" }),
 						ctx.storage.submissions.count({ status: "pending" }),
 					]);
-					return { opened, started, completed, pending };
+					return { opened, completed, pending };
 				},
 			},
 		},

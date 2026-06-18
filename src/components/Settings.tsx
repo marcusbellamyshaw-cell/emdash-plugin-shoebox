@@ -7,6 +7,7 @@ interface SettingsValues {
 	enabled: boolean;
 	brevoApiKey: string;
 	newsletterEnabled: boolean;
+	brevoListId: number;
 	maxFileSize: number;
 	maxPhotos: number;
 	maxSubmissionsPerIp: number;
@@ -17,6 +18,7 @@ const DEFAULTS: SettingsValues = {
 	enabled: true,
 	brevoApiKey: "",
 	newsletterEnabled: true,
+	brevoListId: 3,
 	maxFileSize: 10,
 	maxPhotos: 5,
 	maxSubmissionsPerIp: 3,
@@ -91,6 +93,7 @@ export function Settings() {
 				<Toggle label="Enable newsletter opt-in prompt" checked={values.newsletterEnabled} onChange={(v) => set("newsletterEnabled", v)} />
 				<Field label="Brevo API Key" value={values.brevoApiKey} onChange={(v) => set("brevoApiKey", v)} secret
 					hint="Brevo dashboard → Settings → API Keys" />
+				<NumberField label="Brevo newsletter list ID" value={values.brevoListId} onChange={(v) => set("brevoListId", v)} min={1} max={9999} />
 			</Section>
 
 			<Section title="Limits">

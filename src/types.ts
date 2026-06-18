@@ -64,13 +64,12 @@ export interface SubmissionRecord {
 	eeatSignals: Record<string, unknown>;
 	funnelAnalytics: {
 		widgetOpened?: string;
-		conversationStarted?: string;
 		submissionCompleted?: string;
 	};
 }
 
 export interface AnalyticsEvent {
-	event: "widget_opened" | "conversation_started" | "submission_completed";
+	event: "widget_opened" | "submission_completed";
 	date: string;
 	ip: string;
 	sessionId?: string;
@@ -80,6 +79,7 @@ export interface PluginSettings {
 	enabled: boolean;
 	brevoApiKey: string;
 	newsletterEnabled: boolean;
+	brevoListId: number;
 	maxFileSize: number;
 	maxPhotos: number;
 	maxSubmissionsPerIp: number;
@@ -91,6 +91,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
 	brevoApiKey: "",
 	newsletterEnabled: true,
+	brevoListId: 3,
 	maxFileSize: 10,
 	maxPhotos: 5,
 	maxSubmissionsPerIp: 3,

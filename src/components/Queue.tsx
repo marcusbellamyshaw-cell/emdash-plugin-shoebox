@@ -11,7 +11,6 @@ interface SubmissionListItem extends SubmissionRecord {
 }
 
 interface SubmissionDetail extends SubmissionListItem {
-	conversation: Array<{ role: "user" | "assistant"; content: string }>;
 	collected: Record<string, unknown>;
 }
 
@@ -40,7 +39,9 @@ export function Queue() {
 		setTimeout(() => setToast(null), 4000);
 	}, []);
 
+	const reqIdRef = React.useRef(0);
 	const loadList = React.useCallback(async () => {
+		const reqId = ++reqIdRef.current;
 		setLoading(true);
 		setError(null);
 		try {
@@ -48,11 +49,16 @@ export function Queue() {
 				`${API}/submissions/list?status=${statusFilter}`,
 			);
 			const data = await parseApiResponse<ListResponse>(res, "Failed to load submissions");
+			// Ignore a stale response if a newer filter request was started while
+			// this one was in flight (rapid tab switches would otherwise clobber
+			// the newer results with older ones).
+			if (reqId !== reqIdRef.current) return;
 			setItems(data.items);
 		} catch (err) {
+			if (reqId !== reqIdRef.current) return;
 			setError(err instanceof Error ? err.message : "Failed to load submissions");
 		} finally {
-			setLoading(false);
+			if (reqId === reqIdRef.current) setLoading(false);
 		}
 	}, [statusFilter]);
 
@@ -109,7 +115,7 @@ export function Queue() {
 				body: JSON.stringify({ id: selected.id, reason: rejectReason }),
 			});
 			await parseApiResponse(res, "Failed to reject");
-			showToast("success", "Submission rejected and email sent.");
+			showToast("success", "Submission rejected.");
 			setSelected(null);
 			setConfirmReject(false);
 			void loadList();
@@ -452,35 +458,6 @@ function SubmissionDetailPanel({
 			{submission.taxonomyTags && typeof submission.taxonomyTags === "object" && (
 				<Section title="Taxonomy Tags">
 					<TaxonomyDisplay tags={submission.taxonomyTags as unknown as Record<string, unknown>} />
-				</Section>
-			)}
-
-			{/* Conversation */}
-			{submission.conversation.length > 0 && (
-				<Section title="Conversation">
-					<div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
-						{submission.conversation.map((msg, i) => (
-							<div
-								key={i}
-								style={{
-									padding: "8px 12px",
-									borderRadius: 8,
-									background: msg.role === "user"
-										? "var(--kumo-surface-raised, #f9fafb)"
-										: "var(--kumo-brand-subtle, #fffbeb)",
-									fontSize: 13,
-									lineHeight: 1.6,
-									alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-									maxWidth: "85%",
-								}}
-							>
-								<span style={{ fontWeight: 600, fontSize: 11, color: "var(--kumo-subtle, #6b7280)", display: "block", marginBottom: 4 }}>
-									{msg.role === "user" ? "Submitter" : "Assistant"}
-								</span>
-								{msg.content}
-							</div>
-						))}
-					</div>
 				</Section>
 			)}
 		</div>

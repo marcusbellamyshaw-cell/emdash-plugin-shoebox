@@ -5,7 +5,6 @@ const API = "/_emdash/api/plugins/ebt-shoebox";
 
 interface Stats {
 	opened: number;
-	started: number;
 	completed: number;
 	pending: number;
 }
@@ -45,7 +44,6 @@ export function StatsWidget() {
 		<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
 			<Stat label="Pending Review" value={stats.pending} highlight />
 			<Stat label="Submitted" value={stats.completed} />
-			<Stat label="Conversations Started" value={stats.started} />
 			<Stat label="Widget Opens" value={stats.opened} />
 			<div style={{ gridColumn: "1 / -1" }}>
 				<div style={{ fontSize: 12, color: "var(--kumo-subtle, #6b7280)", marginBottom: 4 }}>

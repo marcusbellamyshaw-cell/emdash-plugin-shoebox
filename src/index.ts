@@ -5,7 +5,7 @@ export { createPlugin } from "./sandbox-entry.js";
 export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
-		version: "1.0.0",
+		version: "1.1.0",
 		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [
@@ -13,15 +13,15 @@ export function shoeboxPlugin(): PluginDescriptor {
 			"content:write",
 			"media:read",
 			"media:write",
-			"network:request:unrestricted",
+			"network:request",
 			"email:send",
 			"hooks.page-fragments:register",
 		],
-		allowedHosts: [
-			"api.cloudflare.com",
-			"api.brevo.com",
-			"r2.cloudflarestorage.com",
-		],
+		allowedHosts: ["api.brevo.com"],
+		// Composite indexes (e.g. ["ip","createdAt"]) are honored by the runtime
+		// definePlugin path (see sandbox-entry.ts) but the PluginDescriptor.storage
+		// type here only types single-column indexes, so cast to keep them while
+		// staying tsc-clean. Keep in sync with the storage block in sandbox-entry.ts.
 		storage: {
 			sessions: {
 				indexes: ["ip", "status", "createdAt", ["ip", "status"]],
@@ -32,7 +32,7 @@ export function shoeboxPlugin(): PluginDescriptor {
 			analytics: {
 				indexes: ["event", "date", ["event", "date"]],
 			},
-		},
+		} as unknown as PluginDescriptor["storage"],
 		adminEntry: "emdash-plugin-shoebox/admin",
 		adminPages: [
 			{ path: "/settings", label: "Shoebox Settings", icon: "gear" },
