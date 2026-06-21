@@ -7,6 +7,11 @@ import type {
 	PluginSettings,
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
+import { R2_PART_SIZE, partCount } from "./video/chunking.js";
+import { isAllowedVideoType, withinSizeCap, sniffVideoMagic } from "./video/validation.js";
+import { videoKey } from "./video/r2.js";
+import type { R2MultipartBinding } from "./video/r2.js";
+import type { VideoUpload } from "./video/types.js";
 
 // ─── R2 media helpers ─────────────────────────────────────────────────────────
 // ctx.media.upload() is unavailable for native plugins using R2 Worker binding —
@@ -34,6 +39,17 @@ async function getMediaBucket(): Promise<R2BucketMinimal | null> {
 		return null;
 	}
 }
+
+async function getMediaMultipart(): Promise<R2MultipartBinding | null> {
+	const bucket = await getMediaBucket();
+	return (bucket as unknown as R2MultipartBinding | null) ?? null;
+}
+
+const VIDEO_EXT_BY_TYPE: Record<string, string> = {
+	"video/mp4": ".mp4",
+	"video/quicktime": ".mov",
+	"video/webm": ".webm",
+};
 
 async function uploadPhotoToR2(
 	filename: string,
@@ -558,6 +574,166 @@ export function createPlugin() {
 
 					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
 					return { ok: true, sessionToken: newToken };
+				},
+			},
+
+			// ── Public: Begin a chunked video upload ────────────────────
+			"video/init": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const settings = await getSettings(ctx);
+					if (!settings.enabled) throw new PluginRouteError("SERVICE_UNAVAILABLE", "Submissions are temporarily closed.", 503);
+					if (!settings.youtubeEnabled) throw new PluginRouteError("SERVICE_UNAVAILABLE", "Video uploads are not currently enabled.", 503);
+
+					const body = ctx.input as { sessionToken?: string; filename?: string; contentType?: string; sizeBytes?: number };
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.status !== "active") throw PluginRouteError.notFound("Session not found.");
+
+					const ip = getIP(ctx);
+					if (!(await checkSubmissionRateLimit(ip, settings, ctx))) {
+						throw new PluginRouteError("RATE_LIMITED", "You've reached the daily submission limit. Please try again tomorrow.", 429);
+					}
+
+					const contentType = (body.contentType ?? "").toLowerCase();
+					if (!isAllowedVideoType(contentType)) throw PluginRouteError.badRequest("Only MP4, MOV, and WebM videos are accepted.");
+					const capBytes = (settings.maxVideoSizeMb ?? 1024) * 1024 * 1024;
+					if (typeof body.sizeBytes !== "number" || !withinSizeCap(body.sizeBytes, capBytes)) {
+						throw PluginRouteError.badRequest(`Video too large. Maximum size is ${settings.maxVideoSizeMb ?? 1024}MB.`);
+					}
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+
+					const ext = VIDEO_EXT_BY_TYPE[contentType] ?? "";
+					const submissionId = crypto.randomUUID();
+					const key = videoKey(submissionId, ext);
+					const mp = await bucket.createMultipartUpload(key);
+
+					const video: VideoUpload = {
+						r2Key: key,
+						uploadId: mp.uploadId,
+						sizeBytes: body.sizeBytes,
+						contentType,
+						originalFilename: body.filename ?? `video${ext}`,
+						parts: [],
+					};
+					// Stash on the session until the form is submitted (mirrors photos).
+					session.collected.videoUpload = video;
+					session.collected.videoSubmissionId = submissionId;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
+					return {
+						ok: true,
+						submissionId,
+						key,
+						uploadId: mp.uploadId,
+						partSize: R2_PART_SIZE,
+						partCount: partCount(body.sizeBytes),
+						sessionToken: newToken,
+					};
+				},
+			},
+
+			// ── Public: Upload one part (raw binary body) ───────────────
+			"video/part": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const url = new URL(ctx.request.url);
+					const token = url.searchParams.get("sessionToken") ?? "";
+					const submissionId = url.searchParams.get("submissionId") ?? "";
+					const partNumber = parseInt(url.searchParams.get("partNumber") ?? "", 10);
+					if (!submissionId || !Number.isInteger(partNumber) || partNumber < 1) {
+						throw PluginRouteError.badRequest("Missing or invalid part parameters.");
+					}
+
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(token, settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== submissionId) throw PluginRouteError.notFound("Upload session not found.");
+					const video = session.collected.videoUpload;
+					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
+
+					const bytes = new Uint8Array(await ctx.request.arrayBuffer());
+					if (bytes.byteLength === 0) throw PluginRouteError.badRequest("Empty part.");
+					if (bytes.byteLength > R2_PART_SIZE) throw PluginRouteError.badRequest("Part exceeds maximum size.");
+
+					// Sniff magic bytes on the first part only.
+					if (partNumber === 1 && !sniffVideoMagic(bytes.subarray(0, 16))) {
+						throw PluginRouteError.badRequest("File does not look like a supported video.");
+					}
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
+					const uploaded = await handle.uploadPart(partNumber, bytes);
+
+					video.parts = [...video.parts.filter((p) => p.partNumber !== partNumber), { partNumber: uploaded.partNumber, etag: uploaded.etag }];
+					session.collected.videoUpload = video;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					return { ok: true, partNumber: uploaded.partNumber, etag: uploaded.etag };
+				},
+			},
+
+			// ── Public: Finalize the multipart upload ───────────────────
+			"video/complete": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const body = ctx.input as { sessionToken?: string; submissionId?: string };
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== body.submissionId) throw PluginRouteError.notFound("Upload session not found.");
+					const video = session.collected.videoUpload;
+					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
+					if (video.parts.length === 0) throw PluginRouteError.badRequest("No parts uploaded.");
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
+					const ordered = [...video.parts].sort((a, b) => a.partNumber - b.partNumber);
+					await handle.complete(ordered);
+
+					video.uploadId = undefined; // mark finalized
+					video.parts = ordered;
+					session.collected.videoUpload = video;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
+					return { ok: true, key: video.r2Key, sessionToken: newToken };
+				},
+			},
+
+			// ── Public: Abort an in-progress upload ─────────────────────
+			"video/abort": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const body = ctx.input as { sessionToken?: string; submissionId?: string };
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== body.submissionId) return { ok: true };
+					const video = session.collected.videoUpload;
+					if (video?.uploadId) {
+						const bucket = await getMediaMultipart();
+						if (bucket) {
+							try { await bucket.resumeMultipartUpload(video.r2Key, video.uploadId).abort(); } catch { /* best effort */ }
+						}
+					}
+					session.collected.videoUpload = undefined;
+					session.collected.videoSubmissionId = undefined;
+					await ctx.storage.sessions.put(sessionId, session);
+					return { ok: true };
 				},
 			},
 

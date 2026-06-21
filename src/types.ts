@@ -23,6 +23,8 @@ export interface CollectedData {
 	copyrightTimestamp?: string;
 	ageConfirmed?: boolean;
 	newsletterSignup?: boolean;
+	videoUpload?: import("./video/types.js").VideoUpload;
+	videoSubmissionId?: string;
 }
 
 export interface InferredTaxonomy {
