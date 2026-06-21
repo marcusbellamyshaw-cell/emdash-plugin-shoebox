@@ -8,6 +8,10 @@ export interface YoutubeCreds {
 	refreshToken: string;
 }
 
+// 60-second timeout for all YouTube/OAuth fetches. Chunk pushes are large, so
+// this is generous, but it ensures a hung socket can't strand a cron tick.
+const YT_FETCH_TIMEOUT_MS = 60_000;
+
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 /** Exchange a stored refresh token for a short-lived access token. */
@@ -18,11 +22,14 @@ export async function getAccessToken(creds: YoutubeCreds, fetchFn: FetchFn): Pro
 		refresh_token: creds.refreshToken,
 		grant_type: "refresh_token",
 	});
+	const ctrl = new AbortController();
+	const tid = setTimeout(() => ctrl.abort(), YT_FETCH_TIMEOUT_MS);
 	const res = await fetchFn(TOKEN_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
 		body: body.toString(),
-	});
+		signal: ctrl.signal,
+	}).finally(() => clearTimeout(tid));
 	if (!res.ok) {
 		throw new Error(`oauth token refresh failed: ${res.status} ${await res.text().catch(() => "")}`);
 	}
@@ -48,6 +55,8 @@ export async function startResumableSession(
 	contentType: string,
 	fetchFn: FetchFn,
 ): Promise<string> {
+	const ctrl = new AbortController();
+	const tid = setTimeout(() => ctrl.abort(), YT_FETCH_TIMEOUT_MS);
 	const res = await fetchFn(RESUMABLE_URL, {
 		method: "POST",
 		headers: {
@@ -60,7 +69,8 @@ export async function startResumableSession(
 			snippet: { title: meta.title.slice(0, 100), description: meta.description.slice(0, 5000) },
 			status: { privacyStatus: meta.privacyStatus, selfDeclaredMadeForKids: false },
 		}),
-	});
+		signal: ctrl.signal,
+	}).finally(() => clearTimeout(tid));
 	if (!res.ok) {
 		throw new Error(`failed to start resumable session: ${res.status} ${await res.text().catch(() => "")}`);
 	}
@@ -82,6 +92,8 @@ export async function pushChunk(
 	fetchFn: FetchFn,
 ): Promise<ChunkResult> {
 	const body = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer;
+	const ctrl = new AbortController();
+	const tid = setTimeout(() => ctrl.abort(), YT_FETCH_TIMEOUT_MS);
 	const res = await fetchFn(sessionUri, {
 		method: "PUT",
 		headers: {
@@ -89,7 +101,8 @@ export async function pushChunk(
 			"Content-Range": contentRangeHeader(range.start, range.end, totalBytes),
 		},
 		body,
-	});
+		signal: ctrl.signal,
+	}).finally(() => clearTimeout(tid));
 	if (res.status === 308) {
 		// "bytes=0-N" → N+1 bytes received so far. Fall back to range.end+1.
 		const r = res.headers.get("Range");

@@ -176,6 +176,22 @@ async function checkSubmissionRateLimit(ip: string, settings: PluginSettings, ct
 	return recent.length < max;
 }
 
+/**
+ * KV-based per-IP daily counter for video/init. Returns the new count after
+ * increment, or null if the limit would be exceeded (caller should reject).
+ * Uses the same read-modify-write pattern as incrementUsed() in quota.ts.
+ */
+async function incrementVideoInitCounter(ip: string, settings: PluginSettings, ctx: PluginContext): Promise<number | null> {
+	const today = new Date().toISOString().slice(0, 10);
+	const key = `video-init:${ip}:${today}`;
+	const max = settings.maxSubmissionsPerIp ?? 3;
+	const current = (await ctx.kv.get<number>(key)) ?? 0;
+	if (current >= max) return null;
+	const next = current + 1;
+	await ctx.kv.set(key, next);
+	return next;
+}
+
 // ─── Newsletter ───────────────────────────────────────────────────────────────
 
 async function signUpForNewsletter(email: string, name: string, phone: string | undefined, settings: PluginSettings): Promise<void> {
@@ -768,6 +784,13 @@ export function createPlugin() {
 						throw PluginRouteError.badRequest(`Video too large. Maximum size is ${settings.maxVideoSizeMb ?? 1024}MB.`);
 					}
 
+					// Per-IP KV counter for video/init — video/init does NOT create a
+					// submission row, so checkSubmissionRateLimit above would not catch it.
+					// Increment only after all validation passes, before creating R2 multipart.
+					if ((await incrementVideoInitCounter(ip, settings, ctx)) === null) {
+						throw new PluginRouteError("RATE_LIMITED", "You've reached the daily video upload limit. Please try again tomorrow.", 429);
+					}
+
 					const bucket = await getMediaMultipart();
 					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
 
@@ -822,6 +845,13 @@ export function createPlugin() {
 					if (!session || session.collected.videoSubmissionId !== submissionId) throw PluginRouteError.notFound("Upload session not found.");
 					const video = session.collected.videoUpload;
 					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
+
+					// Defensively cap part numbers so a client cannot upload more parts
+					// than the declared/capped size allows, bypassing the size limit.
+					const maxParts = partCount(video.sizeBytes);
+					if (partNumber < 1 || partNumber > maxParts) {
+						throw PluginRouteError.badRequest(`Part number ${partNumber} is out of range (1–${maxParts}).`);
+					}
 
 					const bytes = new Uint8Array(await ctx.request.arrayBuffer());
 					if (bytes.byteLength === 0) throw PluginRouteError.badRequest("Empty part.");
@@ -1163,13 +1193,18 @@ export function createPlugin() {
 								.map((p) => deletePhotoFromR2(p.mediaId)),
 						);
 					}
-					if (submission.video?.uploadId) {
-						const bucket = await getMediaMultipart();
-						if (bucket) {
-							try { await bucket.resumeMultipartUpload(submission.video.r2Key, submission.video.uploadId).abort(); } catch { /* best effort */ }
+					// Skip R2 video cleanup if the transfer cron is mid-flight: deleting the
+					// staged object while a resumable PUT is in progress would break that tick.
+					// The cleanup cron will handle the object once the transfer settles.
+					if (submission.youtube?.state !== "uploading") {
+						if (submission.video?.uploadId) {
+							const bucket = await getMediaMultipart();
+							if (bucket) {
+								try { await bucket.resumeMultipartUpload(submission.video.r2Key, submission.video.uploadId).abort(); } catch { /* best effort */ }
+							}
+						} else if (submission.video?.r2Key) {
+							await deletePhotoFromR2(submission.video.r2Key);
 						}
-					} else if (submission.video?.r2Key) {
-						await deletePhotoFromR2(submission.video.r2Key);
 					}
 					return { ok: true, id: body.id, status: "rejected" };
 				},

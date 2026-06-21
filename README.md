@@ -104,6 +104,21 @@ automatically to the EBT YouTube channel.
    ```
 4. In **Shoebox Settings**, toggle **Enable Video → YouTube** on.
 
+#### Abandoned uploads (R2 lifecycle)
+
+The Cloudflare R2 Workers binding has no `listMultipartUploads` method, so the
+plugin cannot enumerate and abort incomplete uploads in code. Instead, configure
+a **bucket-level R2 lifecycle rule** to auto-abort them:
+
+> **Cloudflare dashboard → R2 → your media bucket → Settings → Object lifecycle
+> rules → Add rule → "Abort incomplete multipart uploads after N days"** — set
+> N to **7**.
+
+This only affects multipart uploads that were started but never completed or
+aborted (e.g. a user who began a video upload and closed the tab). It has no
+effect on completed objects. The rule reclaims storage automatically without any
+code changes.
+
 ### Behaviour & limits
 
 - Videos are created **private** and stay private until Google's API audit
