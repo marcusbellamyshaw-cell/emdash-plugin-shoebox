@@ -5,7 +5,7 @@ export { createPlugin } from "./sandbox-entry.js";
 export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
-		version: "1.1.0",
+		version: "1.2.0",
 		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [
@@ -17,7 +17,7 @@ export function shoeboxPlugin(): PluginDescriptor {
 			"email:send",
 			"hooks.page-fragments:register",
 		],
-		allowedHosts: ["api.brevo.com"],
+		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com"],
 		// Composite indexes (e.g. ["ip","createdAt"]) are honored by the runtime
 		// definePlugin path (see sandbox-entry.ts) but the PluginDescriptor.storage
 		// type here only types single-column indexes, so cast to keep them while

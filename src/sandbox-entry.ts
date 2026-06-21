@@ -7,6 +7,16 @@ import type {
 	PluginSettings,
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
+import { R2_PART_SIZE, partCount, nextYoutubeChunk } from "./video/chunking.js";
+import { isAllowedVideoType, withinSizeCap, sniffVideoMagic } from "./video/validation.js";
+import { videoKey, readRange } from "./video/r2.js";
+import type { R2MultipartBinding } from "./video/r2.js";
+import type { VideoUpload } from "./video/types.js";
+import { getAccessToken, startResumableSession, pushChunk } from "./video/youtube.js";
+import type { VideoMeta } from "./video/youtube.js";
+import { hasQuota, incrementUsed } from "./video/quota.js";
+import { assertTransition } from "./video/state.js";
+import type { YoutubeTransfer } from "./video/types.js";
 
 // ─── R2 media helpers ─────────────────────────────────────────────────────────
 // ctx.media.upload() is unavailable for native plugins using R2 Worker binding —
@@ -26,6 +36,19 @@ type R2BucketMinimal = {
 // Vite's static import resolver — the module is only imported at request time.
 const _CF_WORKERS = "cloudflare:workers";
 
+// One resumable chunk per cron tick keeps each tick short and within limits.
+const CRON_CHUNK_PER_TICK = 1;
+const YT_MAX_ATTEMPTS = 5;
+
+async function getWorkerEnv(): Promise<Record<string, unknown> | null> {
+	try {
+		const { env } = (await import(/* @vite-ignore */ _CF_WORKERS)) as { env: Record<string, unknown> };
+		return env ?? null;
+	} catch {
+		return null;
+	}
+}
+
 async function getMediaBucket(): Promise<R2BucketMinimal | null> {
 	try {
 		const { env } = await import(/* @vite-ignore */ _CF_WORKERS) as { env: Record<string, unknown> };
@@ -34,6 +57,17 @@ async function getMediaBucket(): Promise<R2BucketMinimal | null> {
 		return null;
 	}
 }
+
+async function getMediaMultipart(): Promise<R2MultipartBinding | null> {
+	const bucket = await getMediaBucket();
+	return (bucket as unknown as R2MultipartBinding | null) ?? null;
+}
+
+const VIDEO_EXT_BY_TYPE: Record<string, string> = {
+	"video/mp4": ".mp4",
+	"video/quicktime": ".mov",
+	"video/webm": ".webm",
+};
 
 async function uploadPhotoToR2(
 	filename: string,
@@ -140,6 +174,22 @@ async function checkSubmissionRateLimit(ip: string, settings: PluginSettings, ct
 	});
 	const recent = result.items.filter((item) => (item.data as SubmissionRecord).createdAt > dayAgo);
 	return recent.length < max;
+}
+
+/**
+ * KV-based per-IP daily counter for video/init. Returns the new count after
+ * increment, or null if the limit would be exceeded (caller should reject).
+ * Uses the same read-modify-write pattern as incrementUsed() in quota.ts.
+ */
+async function incrementVideoInitCounter(ip: string, settings: PluginSettings, ctx: PluginContext): Promise<number | null> {
+	const today = new Date().toISOString().slice(0, 10);
+	const key = `video-init:${ip}:${today}`;
+	const max = settings.maxSubmissionsPerIp ?? 3;
+	const current = (await ctx.kv.get<number>(key)) ?? 0;
+	if (current >= max) return null;
+	const next = current + 1;
+	await ctx.kv.set(key, next);
+	return next;
 }
 
 // ─── Newsletter ───────────────────────────────────────────────────────────────
@@ -297,12 +347,90 @@ async function trackAnalytic(
 let _fragmentsEnabled: boolean | null = null;
 let _fragmentsEnabledExpiry = 0;
 
+// ─── YouTube transfer helper ──────────────────────────────────────────────────
+
+async function advanceTransfer(submissionId: string, ctx: PluginContext): Promise<void> {
+	const submission = (await ctx.storage.submissions.get(submissionId)) as SubmissionRecord | null;
+	if (!submission?.video || !submission.youtube) return;
+	const yt = submission.youtube;
+	if (yt.state !== "pending_upload" && yt.state !== "uploading") return;
+
+	const settings = await getSettings(ctx);
+	const env = await getWorkerEnv();
+	const creds = {
+		clientId: String(env?.["YOUTUBE_CLIENT_ID"] ?? ""),
+		clientSecret: String(env?.["YOUTUBE_CLIENT_SECRET"] ?? ""),
+		refreshToken: String(env?.["YOUTUBE_REFRESH_TOKEN"] ?? ""),
+	};
+	if (!creds.clientId || !creds.clientSecret || !creds.refreshToken) {
+		ctx.log.warn("[ebt-shoebox] YouTube secrets missing; skipping transfer");
+		return;
+	}
+	const bucket = (await getMediaMultipart());
+	if (!bucket) return;
+
+	const save = async (patch: Partial<YoutubeTransfer>) => {
+		const fresh = (await ctx.storage.submissions.get(submissionId)) as SubmissionRecord | null;
+		if (!fresh) return;
+		await ctx.storage.submissions.put(submissionId, { ...fresh, youtube: { ...fresh.youtube!, ...patch }, updatedAt: new Date().toISOString() });
+	};
+
+	try {
+		const accessToken = await getAccessToken(creds, globalThis.fetch);
+		let resumableUri = yt.resumableUri;
+		if (!resumableUri) {
+			const meta: VideoMeta = {
+				title: `${settings.youtubeTitlePrefix}: ${submission.title}`.slice(0, 100),
+				description: `Submitted to the Every Bit Texas community archive.`,
+				privacyStatus: "private", // forced private until Google audit clears
+			};
+			resumableUri = await startResumableSession(accessToken, meta, submission.video.sizeBytes, submission.video.contentType, globalThis.fetch);
+			if (yt.state === "pending_upload") assertTransition("pending_upload", "uploading");
+			await save({ state: "uploading", resumableUri, error: undefined });
+		}
+
+		const chunk = nextYoutubeChunk(yt.bytesSent, submission.video.sizeBytes);
+		const bytes = await readRange(bucket, submission.video.r2Key, chunk.start, chunk.length);
+		const result = await pushChunk(resumableUri, bytes, { start: chunk.start, end: chunk.end }, submission.video.sizeBytes, globalThis.fetch);
+
+		if (result.status === "incomplete") {
+			await save({ bytesSent: result.bytesReceived });
+			return;
+		}
+
+		// Complete: count quota, record id, flip state, write to the content entry.
+		assertTransition("uploading", "uploaded");
+		await incrementUsed(ctx.kv, new Date().toISOString().slice(0, 10));
+		await save({ state: "uploaded", videoId: result.videoId, bytesSent: submission.video.sizeBytes });
+		if (submission.emdashContentId && ctx.content?.update) {
+			try {
+				await ctx.content.update("community_submissions", submission.emdashContentId, {
+					youtube_video_id: result.videoId,
+				});
+			} catch (err) {
+				ctx.log.warn(`[ebt-shoebox] failed to write youtube_video_id: ${err}`);
+			}
+		}
+	} catch (err) {
+		const attempts = (yt.attempts ?? 0) + 1;
+		const giveUp = attempts >= YT_MAX_ATTEMPTS;
+		ctx.log.error(`[ebt-shoebox] transfer error (attempt ${attempts}): ${String(err)}`);
+		await save({
+			state: giveUp ? "failed" : "pending_upload",
+			attempts,
+			error: String(err).slice(0, 500),
+			// Drop the session URI on hard failure so a retry re-opens one.
+			resumableUri: giveUp ? undefined : yt.resumableUri,
+		});
+	}
+}
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.1.0",
+		version: "1.2.0",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -315,7 +443,7 @@ export function createPlugin() {
 			"email:send",
 			"hooks.page-fragments:register",
 		],
-		allowedHosts: ["api.brevo.com"],
+		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com"],
 
 		storage: {
 			sessions: { indexes: ["ip", "status", "createdAt", ["ip", "status"]] },
@@ -339,6 +467,11 @@ export function createPlugin() {
 				maxPhotos: { type: "number", label: "Max Photos per Submission", default: 5, min: 1, max: 10 },
 				maxSubmissionsPerIp: { type: "number", label: "Max Submissions per IP per 24h", default: 3, min: 1, max: 20 },
 				maxStoryWords: { type: "number", label: "Max Story Word Count", default: 2000, min: 500, max: 5000 },
+				youtubeEnabled: { type: "boolean", label: "Enable Video → YouTube", default: false },
+				maxVideoSizeMb: { type: "number", label: "Max Video Size (MB)", default: 1024, min: 10, max: 4096 },
+				youtubeDailyCap: { type: "number", label: "Max YouTube Uploads per Day", default: 5, min: 1, max: 50 },
+				youtubeTitlePrefix: { type: "string", label: "YouTube Title Prefix", default: "From the Shoebox" },
+				youtubePublicPlaceholder: { type: "boolean", label: "Show pre-audit video placeholder publicly", default: false },
 			},
 		},
 
@@ -355,6 +488,16 @@ export function createPlugin() {
 						.map((b) => b.toString(16).padStart(2, "0"))
 						.join("");
 					await ctx.kv.set("settings:sessionSecret", secret);
+					await ctx.kv.set("settings:youtubeEnabled", false);
+					await ctx.kv.set("settings:maxVideoSizeMb", 1024);
+					await ctx.kv.set("settings:youtubeDailyCap", 5);
+					await ctx.kv.set("settings:youtubeTitlePrefix", "From the Shoebox");
+					await ctx.kv.set("settings:youtubePublicPlaceholder", false);
+					if (ctx.cron) {
+						// Every 10 minutes.
+						await ctx.cron.schedule("video-transfer", { schedule: "*/10 * * * *" });
+						await ctx.cron.schedule("video-cleanup", { schedule: "0 * * * *" }); // hourly
+					}
 					ctx.log.info("[ebt-shoebox] Plugin installed");
 				},
 			},
@@ -434,6 +577,59 @@ export function createPlugin() {
 							key: "shoebox-config",
 						},
 					];
+				},
+			},
+
+			cron: {
+				errorPolicy: "continue",
+				handler: async (event: unknown, ctx: PluginContext) => {
+					const name = (event as { name?: string }).name;
+					if (name === "video-cleanup") {
+						const done = await ctx.storage.submissions.query({
+							where: { status: "approved" },
+							orderBy: { createdAt: "asc" },
+							limit: 50,
+						});
+						const bucket = await getMediaMultipart();
+						if (!bucket) return;
+						for (const item of done.items) {
+							const rec = item.data as SubmissionRecord;
+							// Delete the staged R2 object once the video is safely on YouTube.
+							if (rec.youtube?.state === "uploaded" && rec.video?.r2Key && !rec.video.uploadId) {
+								try {
+									await bucket.delete(rec.video.r2Key);
+									await ctx.storage.submissions.put(item.id, { ...rec, video: { ...rec.video, r2Key: "" } });
+								} catch (err) {
+									ctx.log.warn(`[ebt-shoebox] cleanup delete failed: ${err}`);
+								}
+							}
+						}
+						return;
+					}
+					if (name !== "video-transfer") return;
+					const settings = await getSettings(ctx);
+					if (!settings.youtubeEnabled) return;
+
+					const today = new Date().toISOString().slice(0, 10);
+					if (!(await hasQuota(ctx.kv, today, settings.youtubeDailyCap ?? 5))) {
+						ctx.log.info("[ebt-shoebox] daily YouTube quota reached; deferring");
+						return;
+					}
+
+					// Oldest in-flight first: uploading (resume) then pending_upload.
+					const inflight = await ctx.storage.submissions.query({
+						where: { status: "approved" },
+						orderBy: { createdAt: "asc" },
+						limit: 50,
+					});
+					const candidate = inflight.items
+						.map((i) => ({ id: i.id, rec: i.data as SubmissionRecord }))
+						.find((x) => x.rec.youtube && (x.rec.youtube.state === "uploading" || x.rec.youtube.state === "pending_upload"));
+					if (!candidate) return;
+
+					for (let i = 0; i < CRON_CHUNK_PER_TICK; i++) {
+						await advanceTransfer(candidate.id, ctx);
+					}
 				},
 			},
 		},
@@ -561,6 +757,180 @@ export function createPlugin() {
 				},
 			},
 
+			// ── Public: Begin a chunked video upload ────────────────────
+			"video/init": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const settings = await getSettings(ctx);
+					if (!settings.enabled) throw new PluginRouteError("SERVICE_UNAVAILABLE", "Submissions are temporarily closed.", 503);
+					if (!settings.youtubeEnabled) throw new PluginRouteError("SERVICE_UNAVAILABLE", "Video uploads are not currently enabled.", 503);
+
+					const body = ctx.input as { sessionToken?: string; filename?: string; contentType?: string; sizeBytes?: number };
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.status !== "active") throw PluginRouteError.notFound("Session not found.");
+
+					const ip = getIP(ctx);
+					if (!(await checkSubmissionRateLimit(ip, settings, ctx))) {
+						throw new PluginRouteError("RATE_LIMITED", "You've reached the daily submission limit. Please try again tomorrow.", 429);
+					}
+
+					const contentType = (body.contentType ?? "").toLowerCase();
+					if (!isAllowedVideoType(contentType)) throw PluginRouteError.badRequest("Only MP4, MOV, and WebM videos are accepted.");
+					const capBytes = (settings.maxVideoSizeMb ?? 1024) * 1024 * 1024;
+					if (typeof body.sizeBytes !== "number" || !withinSizeCap(body.sizeBytes, capBytes)) {
+						throw PluginRouteError.badRequest(`Video too large. Maximum size is ${settings.maxVideoSizeMb ?? 1024}MB.`);
+					}
+
+					// Per-IP KV counter for video/init — video/init does NOT create a
+					// submission row, so checkSubmissionRateLimit above would not catch it.
+					// Increment only after all validation passes, before creating R2 multipart.
+					if ((await incrementVideoInitCounter(ip, settings, ctx)) === null) {
+						throw new PluginRouteError("RATE_LIMITED", "You've reached the daily video upload limit. Please try again tomorrow.", 429);
+					}
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+
+					const ext = VIDEO_EXT_BY_TYPE[contentType] ?? "";
+					const submissionId = crypto.randomUUID();
+					const key = videoKey(submissionId, ext);
+					const mp = await bucket.createMultipartUpload(key);
+
+					const video: VideoUpload = {
+						r2Key: key,
+						uploadId: mp.uploadId,
+						sizeBytes: body.sizeBytes,
+						contentType,
+						originalFilename: body.filename ?? `video${ext}`,
+						parts: [],
+					};
+					// Stash on the session until the form is submitted (mirrors photos).
+					session.collected.videoUpload = video;
+					session.collected.videoSubmissionId = submissionId;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
+					return {
+						ok: true,
+						submissionId,
+						key,
+						uploadId: mp.uploadId,
+						partSize: R2_PART_SIZE,
+						partCount: partCount(body.sizeBytes),
+						sessionToken: newToken,
+					};
+				},
+			},
+
+			// ── Public: Upload one part (raw binary body) ───────────────
+			"video/part": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const url = new URL(ctx.request.url);
+					const token = url.searchParams.get("sessionToken") ?? "";
+					const submissionId = url.searchParams.get("submissionId") ?? "";
+					const partNumber = parseInt(url.searchParams.get("partNumber") ?? "", 10);
+					if (!submissionId || !Number.isInteger(partNumber) || partNumber < 1) {
+						throw PluginRouteError.badRequest("Missing or invalid part parameters.");
+					}
+
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(token, settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== submissionId) throw PluginRouteError.notFound("Upload session not found.");
+					const video = session.collected.videoUpload;
+					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
+
+					// Defensively cap part numbers so a client cannot upload more parts
+					// than the declared/capped size allows, bypassing the size limit.
+					const maxParts = partCount(video.sizeBytes);
+					if (partNumber < 1 || partNumber > maxParts) {
+						throw PluginRouteError.badRequest(`Part number ${partNumber} is out of range (1–${maxParts}).`);
+					}
+
+					const bytes = new Uint8Array(await ctx.request.arrayBuffer());
+					if (bytes.byteLength === 0) throw PluginRouteError.badRequest("Empty part.");
+					if (bytes.byteLength > R2_PART_SIZE) throw PluginRouteError.badRequest("Part exceeds maximum size.");
+
+					// Sniff magic bytes on the first part only.
+					if (partNumber === 1 && !sniffVideoMagic(bytes.subarray(0, 16))) {
+						throw PluginRouteError.badRequest("File does not look like a supported video.");
+					}
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
+					const uploaded = await handle.uploadPart(partNumber, bytes);
+
+					video.parts = [...video.parts.filter((p) => p.partNumber !== partNumber), { partNumber: uploaded.partNumber, etag: uploaded.etag }];
+					session.collected.videoUpload = video;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					return { ok: true, partNumber: uploaded.partNumber, etag: uploaded.etag };
+				},
+			},
+
+			// ── Public: Finalize the multipart upload ───────────────────
+			"video/complete": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const body = ctx.input as { sessionToken?: string; submissionId?: string };
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== body.submissionId) throw PluginRouteError.notFound("Upload session not found.");
+					const video = session.collected.videoUpload;
+					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
+					if (video.parts.length === 0) throw PluginRouteError.badRequest("No parts uploaded.");
+
+					const bucket = await getMediaMultipart();
+					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
+					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
+					const ordered = [...video.parts].sort((a, b) => a.partNumber - b.partNumber);
+					await handle.complete(ordered);
+
+					video.uploadId = undefined; // mark finalized
+					video.parts = ordered;
+					session.collected.videoUpload = video;
+					await ctx.storage.sessions.put(sessionId, session);
+
+					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
+					return { ok: true, key: video.r2Key, sessionToken: newToken };
+				},
+			},
+
+			// ── Public: Abort an in-progress upload ─────────────────────
+			"video/abort": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const body = ctx.input as { sessionToken?: string; submissionId?: string };
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.collected.videoSubmissionId !== body.submissionId) return { ok: true };
+					const video = session.collected.videoUpload;
+					if (video?.uploadId) {
+						const bucket = await getMediaMultipart();
+						if (bucket) {
+							try { await bucket.resumeMultipartUpload(video.r2Key, video.uploadId).abort(); } catch { /* best effort */ }
+						}
+					}
+					session.collected.videoUpload = undefined;
+					session.collected.videoSubmissionId = undefined;
+					await ctx.storage.sessions.put(sessionId, session);
+					return { ok: true };
+				},
+			},
+
 			// ── Public: Submit form ─────────────────────────────────────
 			"form/submit": {
 				public: true,
@@ -611,9 +981,17 @@ export function createPlugin() {
 					const dupeCheck = await ctx.storage.submissions.query({ where: { textHash }, limit: 1 });
 					if (dupeCheck.items.length > 0) throw PluginRouteError.conflict("A very similar story has already been submitted.");
 
+					const completedVideo = session.collected.videoUpload && !session.collected.videoUpload.uploadId
+						? session.collected.videoUpload
+						: undefined;
+
 					const taxonomy: InferredTaxonomy = {
 						categories: [], eras: [], tags: [], regions: [], people: [],
-						content_types: (session.collected.photos?.length ?? 0) > 0 ? ["photo", "story"] : ["story"],
+						content_types: [
+							...((session.collected.photos?.length ?? 0) > 0 ? ["photo"] : []),
+							...(completedVideo ? ["video"] : []),
+							"story",
+						],
 						counties: [],
 						confidence: 1.0,
 					};
@@ -672,6 +1050,8 @@ export function createPlugin() {
 						location,
 						photoCount: session.collected.photos?.length ?? 0,
 						photos: session.collected.photos ?? [],
+						video: completedVideo,
+						youtube: completedVideo ? { state: "staged", bytesSent: 0, attempts: 0 } : undefined,
 						taxonomyConfidence: 1.0, taxonomyTags: taxonomy,
 						eeatSignals: {}, funnelAnalytics: { submissionCompleted: now },
 					} satisfies SubmissionRecord);
@@ -708,6 +1088,11 @@ export function createPlugin() {
 						maxPhotos: s.maxPhotos ?? 5,
 						maxSubmissionsPerIp: s.maxSubmissionsPerIp ?? 3,
 						maxStoryWords: s.maxStoryWords ?? 2000,
+						youtubeEnabled: s.youtubeEnabled ?? false,
+						maxVideoSizeMb: s.maxVideoSizeMb ?? 1024,
+						youtubeDailyCap: s.youtubeDailyCap ?? 5,
+						youtubeTitlePrefix: s.youtubeTitlePrefix ?? "From the Shoebox",
+						youtubePublicPlaceholder: s.youtubePublicPlaceholder ?? false,
 					};
 				},
 			},
@@ -729,6 +1114,11 @@ export function createPlugin() {
 						body.maxPhotos != null ? ctx.kv.set("settings:maxPhotos", Number(body.maxPhotos)) : Promise.resolve(),
 						body.maxSubmissionsPerIp != null ? ctx.kv.set("settings:maxSubmissionsPerIp", Number(body.maxSubmissionsPerIp)) : Promise.resolve(),
 						body.maxStoryWords != null ? ctx.kv.set("settings:maxStoryWords", Number(body.maxStoryWords)) : Promise.resolve(),
+						save("youtubeEnabled", body.youtubeEnabled),
+						body.maxVideoSizeMb != null ? ctx.kv.set("settings:maxVideoSizeMb", Number(body.maxVideoSizeMb)) : Promise.resolve(),
+						body.youtubeDailyCap != null ? ctx.kv.set("settings:youtubeDailyCap", Number(body.youtubeDailyCap)) : Promise.resolve(),
+						save("youtubeTitlePrefix", body.youtubeTitlePrefix),
+						save("youtubePublicPlaceholder", body.youtubePublicPlaceholder),
 					]);
 					return { ok: true };
 				},
@@ -772,6 +1162,9 @@ export function createPlugin() {
 					const submission = await ctx.storage.submissions.get(body.id) as SubmissionRecord | null;
 					if (!submission) throw PluginRouteError.notFound("Submission not found");
 					const updated = { ...submission, status: "approved" as const, updatedAt: new Date().toISOString(), emdashContentId: body.emdashContentId ?? submission.emdashContentId };
+					if (updated.video && updated.youtube && updated.youtube.state === "staged") {
+						updated.youtube = { ...updated.youtube, state: "pending_upload" };
+					}
 					await ctx.storage.submissions.put(body.id, updated);
 					if (updated.emdashContentId && ctx.content?.update) {
 						try { await ctx.content.update("community_submissions", updated.emdashContentId, { review_status: "approved" }); }
@@ -799,6 +1192,19 @@ export function createPlugin() {
 								.filter((p) => p.mediaId)
 								.map((p) => deletePhotoFromR2(p.mediaId)),
 						);
+					}
+					// Skip R2 video cleanup if the transfer cron is mid-flight: deleting the
+					// staged object while a resumable PUT is in progress would break that tick.
+					// The cleanup cron will handle the object once the transfer settles.
+					if (submission.youtube?.state !== "uploading") {
+						if (submission.video?.uploadId) {
+							const bucket = await getMediaMultipart();
+							if (bucket) {
+								try { await bucket.resumeMultipartUpload(submission.video.r2Key, submission.video.uploadId).abort(); } catch { /* best effort */ }
+							}
+						} else if (submission.video?.r2Key) {
+							await deletePhotoFromR2(submission.video.r2Key);
+						}
 					}
 					return { ok: true, id: body.id, status: "rejected" };
 				},
