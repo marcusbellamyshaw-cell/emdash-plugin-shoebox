@@ -430,7 +430,7 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.2.1",
+		version: "1.2.2",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -458,21 +458,12 @@ export function createPlugin() {
 				{ path: "/submissions", label: "Review Submissions", icon: "inbox" },
 			],
 			widgets: [{ id: "shoebox-stats", title: "Shoebox Submissions", size: "third" }],
-			settingsSchema: {
-				enabled: { type: "boolean", label: "Enable Plugin", default: true },
-				brevoApiKey: { type: "secret", label: "Brevo API Key", description: "Brevo dashboard → Settings → API Keys" },
-				newsletterEnabled: { type: "boolean", label: "Enable Newsletter Opt-in", default: true },
-				brevoListId: { type: "number", label: "Brevo Newsletter List ID", default: 3, min: 1 },
-				maxFileSize: { type: "number", label: "Max File Size (MB)", default: 10, min: 1, max: 50 },
-				maxPhotos: { type: "number", label: "Max Photos per Submission", default: 5, min: 1, max: 10 },
-				maxSubmissionsPerIp: { type: "number", label: "Max Submissions per IP per 24h", default: 3, min: 1, max: 20 },
-				maxStoryWords: { type: "number", label: "Max Story Word Count", default: 2000, min: 500, max: 5000 },
-				youtubeEnabled: { type: "boolean", label: "Enable Video → YouTube", default: false },
-				maxVideoSizeMb: { type: "number", label: "Max Video Size (MB)", default: 1024, min: 10, max: 4096 },
-				youtubeDailyCap: { type: "number", label: "Max YouTube Uploads per Day", default: 5, min: 1, max: 50 },
-				youtubeTitlePrefix: { type: "string", label: "YouTube Title Prefix", default: "From the Shoebox" },
-				youtubePublicPlaceholder: { type: "boolean", label: "Show pre-audit video placeholder publicly", default: false },
-			},
+			// No settingsSchema: the custom "/settings" page (Settings.tsx) is the
+			// single source of truth for configuration. emdash only renders the
+			// auto-form when no custom settings page exists, so declaring both here
+			// duplicated the field list and let them drift (the v1.2.0 bug, where a
+			// schema field never appeared in the custom form). Matches the first-party
+			// plugin-webhook-notifier convention (custom page, no settingsSchema).
 		},
 
 		hooks: {
