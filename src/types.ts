@@ -1,3 +1,5 @@
+import type { VideoUpload, YoutubeTransfer } from "./video/types.js";
+
 export interface PhotoData {
 	mediaId: string;
 	url: string;
@@ -59,6 +61,8 @@ export interface SubmissionRecord {
 	location: string;
 	photoCount: number;
 	photos?: PhotoData[];
+	video?: VideoUpload;
+	youtube?: YoutubeTransfer;
 	taxonomyConfidence: number;
 	taxonomyTags: InferredTaxonomy;
 	eeatSignals: Record<string, unknown>;
@@ -85,6 +89,11 @@ export interface PluginSettings {
 	maxSubmissionsPerIp: number;
 	maxStoryWords: number;
 	sessionSecret: string;
+	maxVideoSizeMb: number;
+	youtubeEnabled: boolean;
+	youtubeTitlePrefix: string;
+	youtubeDailyCap: number;
+	youtubePublicPlaceholder: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -97,4 +106,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	maxSubmissionsPerIp: 3,
 	maxStoryWords: 2000,
 	sessionSecret: "",
+	maxVideoSizeMb: 1024,
+	youtubeEnabled: false,
+	youtubeTitlePrefix: "From the Shoebox",
+	youtubeDailyCap: 5,
+	youtubePublicPlaceholder: false,
 };
