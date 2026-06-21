@@ -414,7 +414,7 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.1.0",
+		version: "1.2.0",
 		capabilities: [
 			"content:read",
 			"content:write",
