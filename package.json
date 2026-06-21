@@ -11,9 +11,14 @@
     "emdash": ">=0.16.0",
     "react": "^19.0.0"
   },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
     "@types/react": "^19.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
   }
 }
