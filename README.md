@@ -83,6 +83,42 @@ Community photo and story submission plugin for EmDash CMS. Designed by Marcus S
 
 Built for [EmDash CMS](https://github.com/emdash-cms/emdash) — star the repo to support open-source CMS development.
 
+## Video → YouTube hosting
+
+Large community videos upload to R2 in chunks and, on admin approval, transfer
+automatically to the EBT YouTube channel.
+
+### One-time setup
+
+1. In Google Cloud Console, create an OAuth **Desktop app** client for a project
+   that has the **YouTube Data API v3** enabled.
+2. Mint a refresh token (run locally):
+   ```bash
+   YOUTUBE_CLIENT_ID=... YOUTUBE_CLIENT_SECRET=... node scripts/youtube-consent.mjs
+   ```
+3. Store all three as Worker secrets:
+   ```bash
+   wrangler secret put YOUTUBE_CLIENT_ID
+   wrangler secret put YOUTUBE_CLIENT_SECRET
+   wrangler secret put YOUTUBE_REFRESH_TOKEN
+   ```
+4. In **Shoebox Settings**, toggle **Enable Video → YouTube** on.
+
+### Behaviour & limits
+
+- Videos are created **private** and stay private until Google's API audit
+  clears for the project (platform-enforced for unverified apps).
+- Default size cap: **1 GB**. Daily upload cap defaults to **5** (YouTube quota).
+- Transfer runs every ~10 minutes via the plugin cron, advancing one chunk per
+  tick (resumable), so large files complete over several ticks.
+
+### Manual end-to-end test
+
+With secrets set and the feature enabled, submit a short (<50 MB) MP4 through the
+public widget, approve it in **Review Submissions**, then watch the submission's
+`youtube.state` progress to `uploaded` and a private video appear on the channel.
+Delete the test video afterwards.
+
 ## License
 
 MIT
