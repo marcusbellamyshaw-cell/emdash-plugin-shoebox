@@ -787,9 +787,17 @@ export function createPlugin() {
 					const dupeCheck = await ctx.storage.submissions.query({ where: { textHash }, limit: 1 });
 					if (dupeCheck.items.length > 0) throw PluginRouteError.conflict("A very similar story has already been submitted.");
 
+					const completedVideo = session.collected.videoUpload && !session.collected.videoUpload.uploadId
+						? session.collected.videoUpload
+						: undefined;
+
 					const taxonomy: InferredTaxonomy = {
 						categories: [], eras: [], tags: [], regions: [], people: [],
-						content_types: (session.collected.photos?.length ?? 0) > 0 ? ["photo", "story"] : ["story"],
+						content_types: [
+							...((session.collected.photos?.length ?? 0) > 0 ? ["photo"] : []),
+							...(completedVideo ? ["video"] : []),
+							"story",
+						],
 						counties: [],
 						confidence: 1.0,
 					};
@@ -848,6 +856,8 @@ export function createPlugin() {
 						location,
 						photoCount: session.collected.photos?.length ?? 0,
 						photos: session.collected.photos ?? [],
+						video: completedVideo,
+						youtube: completedVideo ? { state: "staged", bytesSent: 0, attempts: 0 } : undefined,
 						taxonomyConfidence: 1.0, taxonomyTags: taxonomy,
 						eeatSignals: {}, funnelAnalytics: { submissionCompleted: now },
 					} satisfies SubmissionRecord);
@@ -948,6 +958,9 @@ export function createPlugin() {
 					const submission = await ctx.storage.submissions.get(body.id) as SubmissionRecord | null;
 					if (!submission) throw PluginRouteError.notFound("Submission not found");
 					const updated = { ...submission, status: "approved" as const, updatedAt: new Date().toISOString(), emdashContentId: body.emdashContentId ?? submission.emdashContentId };
+					if (updated.video && updated.youtube && updated.youtube.state === "staged") {
+						updated.youtube = { ...updated.youtube, state: "pending_upload" };
+					}
 					await ctx.storage.submissions.put(body.id, updated);
 					if (updated.emdashContentId && ctx.content?.update) {
 						try { await ctx.content.update("community_submissions", updated.emdashContentId, { review_status: "approved" }); }
