@@ -81,13 +81,14 @@ export async function pushChunk(
 	totalBytes: number,
 	fetchFn: FetchFn,
 ): Promise<ChunkResult> {
+	const body = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer;
 	const res = await fetchFn(sessionUri, {
 		method: "PUT",
 		headers: {
 			"Content-Length": String(chunk.byteLength),
 			"Content-Range": contentRangeHeader(range.start, range.end, totalBytes),
 		},
-		body: chunk,
+		body,
 	});
 	if (res.status === 308) {
 		// "bytes=0-N" → N+1 bytes received so far. Fall back to range.end+1.
