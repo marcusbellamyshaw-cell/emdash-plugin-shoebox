@@ -383,8 +383,8 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 		}
 
 		// Complete: count quota, record id, flip state, write to the content entry.
-		await incrementUsed(ctx.kv, new Date().toISOString().slice(0, 10));
 		assertTransition("uploading", "uploaded");
+		await incrementUsed(ctx.kv, new Date().toISOString().slice(0, 10));
 		await save({ state: "uploaded", videoId: result.videoId, bytesSent: submission.video.sizeBytes });
 		if (submission.emdashContentId && ctx.content?.update) {
 			try {

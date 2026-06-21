@@ -13,9 +13,6 @@ const TRANSITIONS: Record<VideoState, VideoState[]> = {
 	failed: ["pending_upload"],
 };
 
-/** failed → pending_upload is permitted so the cron can retry transient errors. */
-export const RETRYABLE_FROM_FAILED = true;
-
 export function canTransition(from: VideoState, to: VideoState): boolean {
 	return TRANSITIONS[from]?.includes(to) ?? false;
 }
