@@ -12,6 +12,11 @@ interface SettingsValues {
 	maxPhotos: number;
 	maxSubmissionsPerIp: number;
 	maxStoryWords: number;
+	youtubeEnabled: boolean;
+	maxVideoSizeMb: number;
+	youtubeDailyCap: number;
+	youtubeTitlePrefix: string;
+	youtubePublicPlaceholder: boolean;
 }
 
 const DEFAULTS: SettingsValues = {
@@ -23,6 +28,11 @@ const DEFAULTS: SettingsValues = {
 	maxPhotos: 5,
 	maxSubmissionsPerIp: 3,
 	maxStoryWords: 2000,
+	youtubeEnabled: false,
+	maxVideoSizeMb: 1024,
+	youtubeDailyCap: 5,
+	youtubeTitlePrefix: "From the Shoebox",
+	youtubePublicPlaceholder: false,
 };
 
 export function Settings() {
@@ -101,6 +111,18 @@ export function Settings() {
 				<NumberField label="Max photos per submission" value={values.maxPhotos} onChange={(v) => set("maxPhotos", v)} min={1} max={10} />
 				<NumberField label="Max submissions per IP per 24h" value={values.maxSubmissionsPerIp} onChange={(v) => set("maxSubmissionsPerIp", v)} min={1} max={20} />
 				<NumberField label="Max story word count" value={values.maxStoryWords} onChange={(v) => set("maxStoryWords", v)} min={500} max={5000} />
+			</Section>
+
+			<Section title="Video → YouTube">
+				<Toggle label="Enable Video → YouTube" checked={values.youtubeEnabled} onChange={(v) => set("youtubeEnabled", v)} />
+				<NumberField label="Max video size (MB)" value={values.maxVideoSizeMb} onChange={(v) => set("maxVideoSizeMb", v)} min={10} max={4096} />
+				<NumberField label="Max YouTube uploads per day" value={values.youtubeDailyCap} onChange={(v) => set("youtubeDailyCap", v)} min={1} max={50} />
+				<Field label="YouTube title prefix" value={values.youtubeTitlePrefix} onChange={(v) => set("youtubeTitlePrefix", v)}
+					hint="Prepended to each uploaded video's title, e.g. “From the Shoebox: …”" />
+				<Toggle label="Show pre-audit video placeholder publicly" checked={values.youtubePublicPlaceholder} onChange={(v) => set("youtubePublicPlaceholder", v)} />
+				<p style={{ margin: 0, fontSize: 12, color: "var(--kumo-subtle, #6b7280)" }}>
+					Requires the <code>YOUTUBE_CLIENT_ID</code>, <code>YOUTUBE_CLIENT_SECRET</code>, and <code>YOUTUBE_REFRESH_TOKEN</code> Worker secrets. Uploaded videos are forced <strong>private</strong> until Google audits the channel.
+				</p>
 			</Section>
 
 			<div style={{ paddingTop: 8 }}>
