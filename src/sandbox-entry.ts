@@ -7,11 +7,16 @@ import type {
 	PluginSettings,
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
-import { R2_PART_SIZE, partCount } from "./video/chunking.js";
+import { R2_PART_SIZE, partCount, nextYoutubeChunk } from "./video/chunking.js";
 import { isAllowedVideoType, withinSizeCap, sniffVideoMagic } from "./video/validation.js";
-import { videoKey } from "./video/r2.js";
+import { videoKey, readRange } from "./video/r2.js";
 import type { R2MultipartBinding } from "./video/r2.js";
 import type { VideoUpload } from "./video/types.js";
+import { getAccessToken, startResumableSession, pushChunk } from "./video/youtube.js";
+import type { VideoMeta } from "./video/youtube.js";
+import { hasQuota, incrementUsed } from "./video/quota.js";
+import { assertTransition } from "./video/state.js";
+import type { YoutubeTransfer } from "./video/types.js";
 
 // ─── R2 media helpers ─────────────────────────────────────────────────────────
 // ctx.media.upload() is unavailable for native plugins using R2 Worker binding —
@@ -30,6 +35,19 @@ type R2BucketMinimal = {
 // Workers-runtime-only). Using a variable instead of a string literal bypasses
 // Vite's static import resolver — the module is only imported at request time.
 const _CF_WORKERS = "cloudflare:workers";
+
+// One resumable chunk per cron tick keeps each tick short and within limits.
+const CRON_CHUNK_PER_TICK = 1;
+const YT_MAX_ATTEMPTS = 5;
+
+async function getWorkerEnv(): Promise<Record<string, unknown> | null> {
+	try {
+		const { env } = (await import(/* @vite-ignore */ _CF_WORKERS)) as { env: Record<string, unknown> };
+		return env ?? null;
+	} catch {
+		return null;
+	}
+}
 
 async function getMediaBucket(): Promise<R2BucketMinimal | null> {
 	try {
@@ -313,6 +331,84 @@ async function trackAnalytic(
 let _fragmentsEnabled: boolean | null = null;
 let _fragmentsEnabledExpiry = 0;
 
+// ─── YouTube transfer helper ──────────────────────────────────────────────────
+
+async function advanceTransfer(submissionId: string, ctx: PluginContext): Promise<void> {
+	const submission = (await ctx.storage.submissions.get(submissionId)) as SubmissionRecord | null;
+	if (!submission?.video || !submission.youtube) return;
+	const yt = submission.youtube;
+	if (yt.state !== "pending_upload" && yt.state !== "uploading") return;
+
+	const settings = await getSettings(ctx);
+	const env = await getWorkerEnv();
+	const creds = {
+		clientId: String(env?.["YOUTUBE_CLIENT_ID"] ?? ""),
+		clientSecret: String(env?.["YOUTUBE_CLIENT_SECRET"] ?? ""),
+		refreshToken: String(env?.["YOUTUBE_REFRESH_TOKEN"] ?? ""),
+	};
+	if (!creds.clientId || !creds.clientSecret || !creds.refreshToken) {
+		ctx.log.warn("[ebt-shoebox] YouTube secrets missing; skipping transfer");
+		return;
+	}
+	const bucket = (await getMediaMultipart());
+	if (!bucket) return;
+
+	const save = async (patch: Partial<YoutubeTransfer>) => {
+		const fresh = (await ctx.storage.submissions.get(submissionId)) as SubmissionRecord | null;
+		if (!fresh) return;
+		await ctx.storage.submissions.put(submissionId, { ...fresh, youtube: { ...fresh.youtube!, ...patch }, updatedAt: new Date().toISOString() });
+	};
+
+	try {
+		const accessToken = await getAccessToken(creds, globalThis.fetch);
+		let resumableUri = yt.resumableUri;
+		if (!resumableUri) {
+			const meta: VideoMeta = {
+				title: `${settings.youtubeTitlePrefix}: ${submission.title}`.slice(0, 100),
+				description: `Submitted to the Every Bit Texas community archive.`,
+				privacyStatus: "private", // forced private until Google audit clears
+			};
+			resumableUri = await startResumableSession(accessToken, meta, submission.video.sizeBytes, submission.video.contentType, globalThis.fetch);
+			if (yt.state === "pending_upload") assertTransition("pending_upload", "uploading");
+			await save({ state: "uploading", resumableUri, error: undefined });
+		}
+
+		const chunk = nextYoutubeChunk(yt.bytesSent, submission.video.sizeBytes);
+		const bytes = await readRange(bucket, submission.video.r2Key, chunk.start, chunk.length);
+		const result = await pushChunk(resumableUri, bytes, { start: chunk.start, end: chunk.end }, submission.video.sizeBytes, globalThis.fetch);
+
+		if (result.status === "incomplete") {
+			await save({ bytesSent: result.bytesReceived });
+			return;
+		}
+
+		// Complete: count quota, record id, flip state, write to the content entry.
+		await incrementUsed(ctx.kv, new Date().toISOString().slice(0, 10));
+		assertTransition("uploading", "uploaded");
+		await save({ state: "uploaded", videoId: result.videoId, bytesSent: submission.video.sizeBytes });
+		if (submission.emdashContentId && ctx.content?.update) {
+			try {
+				await ctx.content.update("community_submissions", submission.emdashContentId, {
+					youtube_video_id: result.videoId,
+				});
+			} catch (err) {
+				ctx.log.warn(`[ebt-shoebox] failed to write youtube_video_id: ${err}`);
+			}
+		}
+	} catch (err) {
+		const attempts = (yt.attempts ?? 0) + 1;
+		const giveUp = attempts >= YT_MAX_ATTEMPTS;
+		ctx.log.error(`[ebt-shoebox] transfer error (attempt ${attempts}): ${String(err)}`);
+		await save({
+			state: giveUp ? "failed" : "pending_upload",
+			attempts,
+			error: String(err).slice(0, 500),
+			// Drop the session URI on hard failure so a retry re-opens one.
+			resumableUri: giveUp ? undefined : yt.resumableUri,
+		});
+	}
+}
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export function createPlugin() {
@@ -331,7 +427,7 @@ export function createPlugin() {
 			"email:send",
 			"hooks.page-fragments:register",
 		],
-		allowedHosts: ["api.brevo.com"],
+		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com"],
 
 		storage: {
 			sessions: { indexes: ["ip", "status", "createdAt", ["ip", "status"]] },
@@ -355,6 +451,11 @@ export function createPlugin() {
 				maxPhotos: { type: "number", label: "Max Photos per Submission", default: 5, min: 1, max: 10 },
 				maxSubmissionsPerIp: { type: "number", label: "Max Submissions per IP per 24h", default: 3, min: 1, max: 20 },
 				maxStoryWords: { type: "number", label: "Max Story Word Count", default: 2000, min: 500, max: 5000 },
+				youtubeEnabled: { type: "boolean", label: "Enable Video → YouTube", default: false },
+				maxVideoSizeMb: { type: "number", label: "Max Video Size (MB)", default: 1024, min: 10, max: 4096 },
+				youtubeDailyCap: { type: "number", label: "Max YouTube Uploads per Day", default: 5, min: 1, max: 50 },
+				youtubeTitlePrefix: { type: "string", label: "YouTube Title Prefix", default: "From the Shoebox" },
+				youtubePublicPlaceholder: { type: "boolean", label: "Show pre-audit video placeholder publicly", default: false },
 			},
 		},
 
@@ -371,6 +472,15 @@ export function createPlugin() {
 						.map((b) => b.toString(16).padStart(2, "0"))
 						.join("");
 					await ctx.kv.set("settings:sessionSecret", secret);
+					await ctx.kv.set("settings:youtubeEnabled", false);
+					await ctx.kv.set("settings:maxVideoSizeMb", 1024);
+					await ctx.kv.set("settings:youtubeDailyCap", 5);
+					await ctx.kv.set("settings:youtubeTitlePrefix", "From the Shoebox");
+					await ctx.kv.set("settings:youtubePublicPlaceholder", false);
+					if (ctx.cron) {
+						// Every 10 minutes.
+						await ctx.cron.schedule("video-transfer", { schedule: "*/10 * * * *" });
+					}
 					ctx.log.info("[ebt-shoebox] Plugin installed");
 				},
 			},
@@ -450,6 +560,37 @@ export function createPlugin() {
 							key: "shoebox-config",
 						},
 					];
+				},
+			},
+
+			cron: {
+				errorPolicy: "continue",
+				handler: async (event: unknown, ctx: PluginContext) => {
+					const name = (event as { name?: string }).name;
+					if (name !== "video-transfer") return;
+					const settings = await getSettings(ctx);
+					if (!settings.youtubeEnabled) return;
+
+					const today = new Date().toISOString().slice(0, 10);
+					if (!(await hasQuota(ctx.kv, today, settings.youtubeDailyCap ?? 5))) {
+						ctx.log.info("[ebt-shoebox] daily YouTube quota reached; deferring");
+						return;
+					}
+
+					// Oldest in-flight first: uploading (resume) then pending_upload.
+					const inflight = await ctx.storage.submissions.query({
+						where: { status: "approved" },
+						orderBy: { createdAt: "asc" },
+						limit: 50,
+					});
+					const candidate = inflight.items
+						.map((i) => ({ id: i.id, rec: i.data as SubmissionRecord }))
+						.find((x) => x.rec.youtube && (x.rec.youtube.state === "uploading" || x.rec.youtube.state === "pending_upload"));
+					if (!candidate) return;
+
+					for (let i = 0; i < CRON_CHUNK_PER_TICK; i++) {
+						await advanceTransfer(candidate.id, ctx);
+					}
 				},
 			},
 		},
@@ -894,6 +1035,11 @@ export function createPlugin() {
 						maxPhotos: s.maxPhotos ?? 5,
 						maxSubmissionsPerIp: s.maxSubmissionsPerIp ?? 3,
 						maxStoryWords: s.maxStoryWords ?? 2000,
+						youtubeEnabled: s.youtubeEnabled ?? false,
+						maxVideoSizeMb: s.maxVideoSizeMb ?? 1024,
+						youtubeDailyCap: s.youtubeDailyCap ?? 5,
+						youtubeTitlePrefix: s.youtubeTitlePrefix ?? "From the Shoebox",
+						youtubePublicPlaceholder: s.youtubePublicPlaceholder ?? false,
 					};
 				},
 			},
@@ -915,6 +1061,11 @@ export function createPlugin() {
 						body.maxPhotos != null ? ctx.kv.set("settings:maxPhotos", Number(body.maxPhotos)) : Promise.resolve(),
 						body.maxSubmissionsPerIp != null ? ctx.kv.set("settings:maxSubmissionsPerIp", Number(body.maxSubmissionsPerIp)) : Promise.resolve(),
 						body.maxStoryWords != null ? ctx.kv.set("settings:maxStoryWords", Number(body.maxStoryWords)) : Promise.resolve(),
+						save("youtubeEnabled", body.youtubeEnabled),
+						body.maxVideoSizeMb != null ? ctx.kv.set("settings:maxVideoSizeMb", Number(body.maxVideoSizeMb)) : Promise.resolve(),
+						body.youtubeDailyCap != null ? ctx.kv.set("settings:youtubeDailyCap", Number(body.youtubeDailyCap)) : Promise.resolve(),
+						save("youtubeTitlePrefix", body.youtubeTitlePrefix),
+						save("youtubePublicPlaceholder", body.youtubePublicPlaceholder),
 					]);
 					return { ok: true };
 				},
