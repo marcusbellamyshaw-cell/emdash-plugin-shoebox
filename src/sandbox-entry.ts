@@ -480,6 +480,7 @@ export function createPlugin() {
 					if (ctx.cron) {
 						// Every 10 minutes.
 						await ctx.cron.schedule("video-transfer", { schedule: "*/10 * * * *" });
+						await ctx.cron.schedule("video-cleanup", { schedule: "0 * * * *" }); // hourly
 					}
 					ctx.log.info("[ebt-shoebox] Plugin installed");
 				},
@@ -567,6 +568,28 @@ export function createPlugin() {
 				errorPolicy: "continue",
 				handler: async (event: unknown, ctx: PluginContext) => {
 					const name = (event as { name?: string }).name;
+					if (name === "video-cleanup") {
+						const done = await ctx.storage.submissions.query({
+							where: { status: "approved" },
+							orderBy: { createdAt: "asc" },
+							limit: 50,
+						});
+						const bucket = await getMediaMultipart();
+						if (!bucket) return;
+						for (const item of done.items) {
+							const rec = item.data as SubmissionRecord;
+							// Delete the staged R2 object once the video is safely on YouTube.
+							if (rec.youtube?.state === "uploaded" && rec.video?.r2Key && !rec.video.uploadId) {
+								try {
+									await bucket.delete(rec.video.r2Key);
+									await ctx.storage.submissions.put(item.id, { ...rec, video: { ...rec.video, r2Key: "" } });
+								} catch (err) {
+									ctx.log.warn(`[ebt-shoebox] cleanup delete failed: ${err}`);
+								}
+							}
+						}
+						return;
+					}
 					if (name !== "video-transfer") return;
 					const settings = await getSettings(ctx);
 					if (!settings.youtubeEnabled) return;
@@ -1139,6 +1162,14 @@ export function createPlugin() {
 								.filter((p) => p.mediaId)
 								.map((p) => deletePhotoFromR2(p.mediaId)),
 						);
+					}
+					if (submission.video?.uploadId) {
+						const bucket = await getMediaMultipart();
+						if (bucket) {
+							try { await bucket.resumeMultipartUpload(submission.video.r2Key, submission.video.uploadId).abort(); } catch { /* best effort */ }
+						}
+					} else if (submission.video?.r2Key) {
+						await deletePhotoFromR2(submission.video.r2Key);
 					}
 					return { ok: true, id: body.id, status: "rejected" };
 				},
