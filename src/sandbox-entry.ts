@@ -644,7 +644,17 @@ export function createPlugin() {
 					});
 					await trackAnalytic("widget_opened", ip, sessionId, ctx);
 					const token = await signSessionToken(sessionId, settings.sessionSecret);
-					return { ok: true, sessionToken: token, maxPhotos: settings.maxPhotos ?? 5 };
+					return {
+						ok: true,
+						sessionToken: token,
+						maxPhotos: settings.maxPhotos ?? 5,
+						maxFileSize: settings.maxFileSize ?? 10,
+						// Drives the video upload UI: the page only renders the video
+						// section when video → YouTube is actually enabled, so it never
+						// shows an uploader that would 503 on video/init.
+						videoEnabled: settings.youtubeEnabled ?? false,
+						maxVideoSizeMb: settings.maxVideoSizeMb ?? 1024,
+					};
 				},
 			},
 
@@ -858,10 +868,14 @@ export function createPlugin() {
 					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
 					const uploaded = await handle.uploadPart(partNumber, bytes);
 
-					video.parts = [...video.parts.filter((p) => p.partNumber !== partNumber), { partNumber: uploaded.partNumber, etag: uploaded.etag }];
-					session.collected.videoUpload = video;
-					await ctx.storage.sessions.put(sessionId, session);
-
+					// Intentionally NOT persisted to the session here. The client owns the
+					// parts list (it collects each {partNumber, etag} below) and sends the
+					// full list to video/complete. Writing the session on every part would
+					// (a) add a storage round-trip to each part's latency and (b) race with
+					// concurrent parallel part uploads, silently dropping etags via
+					// lost-update. R2 re-validates every etag at complete() time, so a
+					// client-supplied parts list is safe — and lets the browser upload
+					// parts in parallel to saturate the connection.
 					return { ok: true, partNumber: uploaded.partNumber, etag: uploaded.etag };
 				},
 			},
@@ -871,7 +885,11 @@ export function createPlugin() {
 				public: true,
 				handler: async (ctx: RouteContext) => {
 					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
-					const body = ctx.input as { sessionToken?: string; submissionId?: string };
+					const body = ctx.input as {
+						sessionToken?: string;
+						submissionId?: string;
+						parts?: { partNumber?: number; etag?: string }[];
+					};
 					const settings = await getSettings(ctx);
 					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
 					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
@@ -879,12 +897,36 @@ export function createPlugin() {
 					if (!session || session.collected.videoSubmissionId !== body.submissionId) throw PluginRouteError.notFound("Upload session not found.");
 					const video = session.collected.videoUpload;
 					if (!video?.uploadId) throw PluginRouteError.conflict("Upload already finalized.");
-					if (video.parts.length === 0) throw PluginRouteError.badRequest("No parts uploaded.");
+
+					// The client owns the parts list (it collects each {partNumber, etag}
+					// from the video/part responses). Fall back to any session-accumulated
+					// parts for backward compatibility. Validate every entry, dedupe by
+					// partNumber, and require a contiguous 1..N run before completing — R2
+					// also rejects gaps/bad etags, but failing fast gives a clear message.
+					const maxParts = partCount(video.sizeBytes);
+					const rawParts = (Array.isArray(body.parts) && body.parts.length > 0) ? body.parts : video.parts;
+					const byNumber = new Map<number, string>();
+					for (const p of rawParts) {
+						const n = Number(p?.partNumber);
+						const etag = typeof p?.etag === "string" ? p.etag : "";
+						if (!Number.isInteger(n) || n < 1 || n > maxParts || !etag) {
+							throw PluginRouteError.badRequest("Invalid part list.");
+						}
+						byNumber.set(n, etag);
+					}
+					if (byNumber.size === 0) throw PluginRouteError.badRequest("No parts uploaded.");
+					const ordered = [...byNumber.entries()]
+						.sort((a, b) => a[0] - b[0])
+						.map(([partNumber, etag]) => ({ partNumber, etag }));
+					for (let i = 0; i < ordered.length; i++) {
+						if (ordered[i].partNumber !== i + 1) {
+							throw PluginRouteError.badRequest("Upload is missing one or more parts. Please try again.");
+						}
+					}
 
 					const bucket = await getMediaMultipart();
 					if (!bucket) throw new PluginRouteError("CONFIG_ERROR", "Video storage is not available.", 503);
 					const handle = bucket.resumeMultipartUpload(video.r2Key, video.uploadId);
-					const ordered = [...video.parts].sort((a, b) => a.partNumber - b.partNumber);
 					await handle.complete(ordered);
 
 					video.uploadId = undefined; // mark finalized
