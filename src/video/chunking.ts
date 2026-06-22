@@ -1,5 +1,14 @@
-/** R2 multipart part size for browser → R2 video uploads (64 MB). */
-export const R2_PART_SIZE = 64 * 1024 * 1024;
+/**
+ * R2 multipart part size for browser → R2 video uploads (6 MiB).
+ *
+ * Parts are sent as base64 inside a JSON body through the plugin route
+ * (`ctx.input`) — a plugin route cannot read a raw binary request body because
+ * Emdash consumes the body to build `ctx.input`. Base64 inflates payloads by
+ * 4/3, and the plugin-route body limit is ~12 MB, so the raw part must stay
+ * small: 6 MiB → ~8.4 MB JSON body. It must also stay at/above R2's 5 MiB
+ * multipart minimum (every part except the last). 6 MiB satisfies both.
+ */
+export const R2_PART_SIZE = 6 * 1024 * 1024;
 
 /** YouTube resumable PUT chunk size (8 MB = 32 × 256 KB). Must stay a 256 KB multiple. */
 export const YT_CHUNK_SIZE = 8 * 1024 * 1024;

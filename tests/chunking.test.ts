@@ -9,8 +9,12 @@ import {
 } from "../src/video/chunking.js";
 
 describe("R2 part math", () => {
-	it("uses a 64 MB R2 part size", () => {
-		expect(R2_PART_SIZE).toBe(64 * 1024 * 1024);
+	it("uses a 6 MiB R2 part size (fits base64 in the plugin-route body limit, ≥ R2's 5 MiB minimum)", () => {
+		expect(R2_PART_SIZE).toBe(6 * 1024 * 1024);
+		// base64 of one raw part must stay under the ~12 MB plugin-route body cap.
+		expect(Math.ceil(R2_PART_SIZE / 3) * 4).toBeLessThan(12 * 1024 * 1024);
+		// and at/above R2's 5 MiB multipart minimum for non-final parts.
+		expect(R2_PART_SIZE).toBeGreaterThanOrEqual(5 * 1024 * 1024);
 	});
 
 	it("counts parts, rounding up", () => {

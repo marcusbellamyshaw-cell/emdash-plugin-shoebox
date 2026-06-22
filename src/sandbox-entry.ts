@@ -831,16 +831,25 @@ export function createPlugin() {
 				public: true,
 				handler: async (ctx: RouteContext) => {
 					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
-					const url = new URL(ctx.request.url);
-					const token = url.searchParams.get("sessionToken") ?? "";
-					const submissionId = url.searchParams.get("submissionId") ?? "";
-					const partNumber = parseInt(url.searchParams.get("partNumber") ?? "", 10);
+					// The part bytes arrive base64-encoded in the JSON body (ctx.input),
+					// NOT as a raw binary body: a plugin route can't read a raw request
+					// body because Emdash consumes it to build ctx.input. Mirrors the
+					// photo upload route (chat/upload).
+					const body = ctx.input as {
+						sessionToken?: string;
+						submissionId?: string;
+						partNumber?: number;
+						data?: string;
+					};
+					const submissionId = body.submissionId ?? "";
+					const partNumber = Number(body.partNumber);
 					if (!submissionId || !Number.isInteger(partNumber) || partNumber < 1) {
 						throw PluginRouteError.badRequest("Missing or invalid part parameters.");
 					}
+					if (!body.data) throw PluginRouteError.badRequest("Empty part.");
 
 					const settings = await getSettings(ctx);
-					const sessionId = await verifySessionToken(token, settings.sessionSecret);
+					const sessionId = await verifySessionToken(body.sessionToken ?? "", settings.sessionSecret);
 					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
 					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
 					if (!session || session.collected.videoSubmissionId !== submissionId) throw PluginRouteError.notFound("Upload session not found.");
@@ -854,7 +863,18 @@ export function createPlugin() {
 						throw PluginRouteError.badRequest(`Part number ${partNumber} is out of range (1–${maxParts}).`);
 					}
 
-					const bytes = new Uint8Array(await ctx.request.arrayBuffer());
+					// Reject oversized parts from the encoded length BEFORE decoding,
+					// so a client can't force atob() over an arbitrarily large payload.
+					if (Math.floor((body.data.length * 3) / 4) > R2_PART_SIZE) {
+						throw PluginRouteError.badRequest("Part exceeds maximum size.");
+					}
+
+					let bytes: Uint8Array;
+					try {
+						bytes = Uint8Array.from(atob(body.data), (c) => c.charCodeAt(0));
+					} catch {
+						throw PluginRouteError.badRequest("Invalid part data. Please try uploading again.");
+					}
 					if (bytes.byteLength === 0) throw PluginRouteError.badRequest("Empty part.");
 					if (bytes.byteLength > R2_PART_SIZE) throw PluginRouteError.badRequest("Part exceeds maximum size.");
 
