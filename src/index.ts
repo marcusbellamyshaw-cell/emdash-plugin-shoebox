@@ -5,7 +5,7 @@ export { createPlugin } from "./sandbox-entry.js";
 export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
-		version: "1.2.2",
+		version: "1.3.0",
 		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [
@@ -36,7 +36,7 @@ export function shoeboxPlugin(): PluginDescriptor {
 		adminEntry: "emdash-plugin-shoebox/admin",
 		adminPages: [
 			{ path: "/settings", label: "Shoebox Settings", icon: "gear" },
-			{ path: "/submissions", label: "Review Submissions", icon: "inbox" },
+			// "Review Submissions" queue removed — submissions are reviewed and published in Content → Community Submissions; publishing is the approval.
 		],
 		adminWidgets: [
 			{ id: "shoebox-stats", title: "Shoebox Submissions", size: "third" },

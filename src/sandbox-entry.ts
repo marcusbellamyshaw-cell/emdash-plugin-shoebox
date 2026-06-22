@@ -425,12 +425,58 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 	}
 }
 
+// ─── Promote a submission when its content entry is published ──────────────────
+// The admin review queue has been removed: *publishing* the community_submissions
+// content entry is now the single approval gesture. This finds the plugin's
+// storage record for that entry and promotes it — marks it approved and, if it
+// carries a staged video, arms the YouTube transfer cron (staged → pending_upload).
+// Idempotent: once a record is "approved" a re-publish finds no pending match.
+async function promoteSubmissionForContent(contentId: string, ctx: PluginContext): Promise<void> {
+	// `submissions` has no emdashContentId index and pending volume is low, so scan
+	// the newest pending records and match on the linked content id.
+	const pending = await ctx.storage.submissions.query({
+		where: { status: "pending" },
+		orderBy: { createdAt: "desc" },
+		limit: 100,
+	});
+	const match = pending.items.find((i) => (i.data as SubmissionRecord).emdashContentId === contentId);
+	if (!match) return;
+	const submission = match.data as SubmissionRecord;
+	const updated: SubmissionRecord = { ...submission, status: "approved", updatedAt: new Date().toISOString() };
+	if (updated.video && updated.youtube && updated.youtube.state === "staged") {
+		updated.youtube = { ...updated.youtube, state: "pending_upload" };
+	}
+	await ctx.storage.submissions.put(match.id, updated);
+}
+
+// ─── Asset cleanup for a discarded submission ─────────────────────────────────
+// Deletes a submission's R2 photos and aborts/deletes its staged video. Skips the
+// video if a YouTube transfer is mid-flight (the cron owns that object). Shared by
+// the legacy submissions/reject route and the content:afterDelete hook.
+async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: PluginContext): Promise<void> {
+	if (submission.photos?.length) {
+		await Promise.all(
+			submission.photos.filter((p) => p.mediaId).map((p) => deletePhotoFromR2(p.mediaId)),
+		);
+	}
+	if (submission.youtube?.state !== "uploading") {
+		if (submission.video?.uploadId) {
+			const bucket = await getMediaMultipart();
+			if (bucket) {
+				try { await bucket.resumeMultipartUpload(submission.video.r2Key, submission.video.uploadId).abort(); } catch { /* best effort */ }
+			}
+		} else if (submission.video?.r2Key) {
+			await deletePhotoFromR2(submission.video.r2Key);
+		}
+	}
+}
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.2.2",
+		version: "1.3.0",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -455,7 +501,7 @@ export function createPlugin() {
 			entry: "ebt-plugin-shoebox/admin",
 			pages: [
 				{ path: "/settings", label: "Shoebox Settings", icon: "gear" },
-				{ path: "/submissions", label: "Review Submissions", icon: "inbox" },
+				// "Review Submissions" queue removed — submissions are reviewed and published in Content → Community Submissions; publishing is the approval (see content:afterPublish).
 			],
 			widgets: [{ id: "shoebox-stats", title: "Shoebox Submissions", size: "third" }],
 			// No settingsSchema: the custom "/settings" page (Settings.tsx) is the
@@ -493,11 +539,44 @@ export function createPlugin() {
 				},
 			},
 
-			"content:afterPublish": {
+			"content:afterDelete": {
+					errorPolicy: "continue",
+					handler: async (event: unknown, ctx: PluginContext) => {
+						const e = event as { id?: string; collection?: string };
+						if (e.collection !== "community_submissions" || !e.id) return;
+						// Discarding a draft is the new "reject" — clean up the linked
+						// submission's R2 assets and mark it rejected (kept for dedup/
+						// rate-limit history). No emdashContentId index, so scan recent.
+						const recent = await ctx.storage.submissions.query({
+							orderBy: { createdAt: "desc" },
+							limit: 200,
+						});
+						const match = recent.items.find((i) => (i.data as SubmissionRecord).emdashContentId === e.id);
+						if (!match) return;
+						const submission = match.data as SubmissionRecord;
+						await cleanupSubmissionAssets(submission, ctx);
+						await ctx.storage.submissions.put(match.id, {
+							...submission,
+							status: "rejected",
+							emdashContentId: undefined,
+							updatedAt: new Date().toISOString(),
+						});
+					},
+				},
+
+				"content:afterPublish": {
 				errorPolicy: "continue",
 				handler: async (event: unknown, ctx: PluginContext) => {
 					const e = event as { content?: { id?: string; data?: Record<string, unknown> }; collection?: string };
 					if (e.collection !== "community_submissions") return;
+
+					// Publishing the entry IS the approval. Promote the linked storage
+					// record (and arm the video → YouTube transfer if one is staged).
+					if (e.content?.id) {
+						try { await promoteSubmissionForContent(e.content.id, ctx); }
+						catch (err) { ctx.log.warn(`[ebt-shoebox] promote on publish failed: ${err}`); }
+					}
+
 					const data = e.content?.data ?? {};
 					const name = data.submitter_name as string | undefined;
 					const email = data.submitter_email as string | undefined;
