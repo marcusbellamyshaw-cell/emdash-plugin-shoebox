@@ -8,7 +8,7 @@ import type {
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
 import { R2_PART_SIZE, partCount, nextYoutubeChunk } from "./video/chunking.js";
-import { isAllowedVideoType, withinSizeCap, sniffVideoMagic } from "./video/validation.js";
+import { isAllowedVideoType, withinSizeCap, sniffVideoMagic, sniffImageMagic, MIN_VIDEO_BYTES } from "./video/validation.js";
 import { videoKey, readRange } from "./video/r2.js";
 import type { R2MultipartBinding } from "./video/r2.js";
 import type { VideoUpload } from "./video/types.js";
@@ -786,6 +786,10 @@ export function createPlugin() {
 						throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
 					}
 
+					if (!sniffImageMagic(bytes.subarray(0, 12))) {
+						throw PluginRouteError.badRequest("That file doesn't look like a valid JPG, PNG, or WebP image.");
+					}
+
 					const currentPhotos = session.collected.photos ?? [];
 					if (currentPhotos.length >= (settings.maxPhotos ?? 5)) {
 						throw PluginRouteError.badRequest(`Maximum ${settings.maxPhotos ?? 5} photos per submission.`);
@@ -862,6 +866,9 @@ export function createPlugin() {
 					const capBytes = (settings.maxVideoSizeMb ?? 1024) * 1024 * 1024;
 					if (typeof body.sizeBytes !== "number" || !withinSizeCap(body.sizeBytes, capBytes)) {
 						throw PluginRouteError.badRequest(`Video too large. Maximum size is ${settings.maxVideoSizeMb ?? 1024}MB.`);
+					}
+					if (body.sizeBytes < MIN_VIDEO_BYTES) {
+						throw PluginRouteError.badRequest("That file is too small to be a valid video.");
 					}
 
 					// Per-IP KV counter for video/init — video/init does NOT create a
