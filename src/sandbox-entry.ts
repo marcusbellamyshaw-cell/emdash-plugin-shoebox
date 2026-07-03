@@ -194,7 +194,7 @@ async function incrementVideoInitCounter(ip: string, settings: PluginSettings, c
 
 // ─── Newsletter ───────────────────────────────────────────────────────────────
 
-async function signUpForNewsletter(email: string, name: string, phone: string | undefined, settings: PluginSettings): Promise<void> {
+async function signUpForNewsletter(email: string, name: string, phone: string | undefined, settings: PluginSettings, ctx: PluginContext): Promise<void> {
 	if (!settings.brevoApiKey || !settings.newsletterEnabled) return;
 	const attributes: Record<string, string> = { FIRSTNAME: name.split(" ")[0] ?? "" };
 	if (phone) attributes.SMS = phone;
@@ -203,7 +203,7 @@ async function signUpForNewsletter(email: string, name: string, phone: string | 
 		// slow Brevo API hold the form/submit response hostage.
 		const ctrl = new AbortController();
 		const tid = setTimeout(() => ctrl.abort(), 6_000);
-		await globalThis.fetch("https://api.brevo.com/v3/contacts", {
+		await ctx.http!.fetch("https://api.brevo.com/v3/contacts", {
 			method: "POST",
 			headers: { "api-key": settings.brevoApiKey, "Content-Type": "application/json" },
 			body: JSON.stringify({ email, attributes, listIds: [settings.brevoListId ?? 3], updateEnabled: true }),
@@ -228,7 +228,7 @@ function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-async function sendApprovalEmail(name: string, email: string, storyUrl: string, settings: PluginSettings): Promise<void> {
+async function sendApprovalEmail(name: string, email: string, storyUrl: string, settings: PluginSettings, ctx: PluginContext): Promise<void> {
 	if (!settings.brevoApiKey || !email) return;
 	const firstName = escapeHtml(name.split(" ")[0] || name);
 	const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -264,7 +264,7 @@ async function sendApprovalEmail(name: string, email: string, storyUrl: string, 
 		// a slow Brevo API should not stall the content:afterPublish hook indefinitely.
 		const ctrl = new AbortController();
 		const tid = setTimeout(() => ctrl.abort(), 10_000);
-		const res = await globalThis.fetch("https://api.brevo.com/v3/smtp/email", {
+		const res = await ctx.http!.fetch("https://api.brevo.com/v3/smtp/email", {
 			method: "POST",
 			headers: { "api-key": settings.brevoApiKey, "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -375,8 +375,13 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 		await ctx.storage.submissions.put(submissionId, { ...fresh, youtube: { ...fresh.youtube!, ...patch }, updatedAt: new Date().toISOString() });
 	};
 
+	// Routes ctx.http.fetch through the plugin's declared allowedHosts instead
+	// of the unrestricted global fetch (oauth2/www/upload.googleapis.com are
+	// already allowlisted for this plugin).
+	const capFetch: typeof fetch = (input, init) => ctx.http!.fetch(String(input), init);
+
 	try {
-		const accessToken = await getAccessToken(creds, globalThis.fetch);
+		const accessToken = await getAccessToken(creds, capFetch);
 		let resumableUri = yt.resumableUri;
 		if (!resumableUri) {
 			const meta: VideoMeta = {
@@ -384,14 +389,14 @@ async function advanceTransfer(submissionId: string, ctx: PluginContext): Promis
 				description: `Submitted to the Every Bit Texas community archive.`,
 				privacyStatus: "private", // forced private until Google audit clears
 			};
-			resumableUri = await startResumableSession(accessToken, meta, submission.video.sizeBytes, submission.video.contentType, globalThis.fetch);
+			resumableUri = await startResumableSession(accessToken, meta, submission.video.sizeBytes, submission.video.contentType, capFetch);
 			if (yt.state === "pending_upload") assertTransition("pending_upload", "uploading");
 			await save({ state: "uploading", resumableUri, error: undefined });
 		}
 
 		const chunk = nextYoutubeChunk(yt.bytesSent, submission.video.sizeBytes);
 		const bytes = await readRange(bucket, submission.video.r2Key, chunk.start, chunk.length);
-		const result = await pushChunk(resumableUri, bytes, { start: chunk.start, end: chunk.end }, submission.video.sizeBytes, globalThis.fetch);
+		const result = await pushChunk(resumableUri, bytes, { start: chunk.start, end: chunk.end }, submission.video.sizeBytes, capFetch);
 
 		if (result.status === "incomplete") {
 			await save({ bytesSent: result.bytesReceived });
@@ -623,7 +628,7 @@ export function createPlugin() {
 					}
 
 					if (!name || !email) return;
-					await sendApprovalEmail(name, email, storyUrl, settings);
+					await sendApprovalEmail(name, email, storyUrl, settings, ctx);
 				},
 			},
 
@@ -1201,7 +1206,7 @@ export function createPlugin() {
 					await ctx.storage.sessions.put(sessionId, session);
 					await trackAnalytic("submission_completed", ip, sessionId, ctx);
 
-					if (body.newsletterSignup && body.email) await signUpForNewsletter(body.email, name, body.phone, settings);
+					if (body.newsletterSignup && body.email) await signUpForNewsletter(body.email, name, body.phone, settings, ctx);
 
 					return { ok: true, submissionId };
 					} catch (err) {
