@@ -19,9 +19,12 @@ import { assertTransition } from "./video/state.js";
 import type { YoutubeTransfer } from "./video/types.js";
 
 // ─── R2 media helpers ─────────────────────────────────────────────────────────
-// ctx.media.upload() is unavailable for native plugins using R2 Worker binding —
-// emdash gates MediaAccessWithWrite behind getUploadUrl which R2 binding doesn't
-// provide (presigned URLs are unsupported). We replicate bridge.mediaUpload directly.
+// These are ephemeral staging objects, not permanent media-library assets:
+// uploaded at submission time before any moderation, then deleted wholesale on
+// approve/reject. ctx.media.upload() creates a permanent Media Library DB row
+// per call, which would surface every unmoderated (including later-rejected)
+// submission photo in the admin Media Library before human review. We write
+// directly to the R2 binding instead so nothing is DB-tracked until promoted.
 
 const FILE_EXT_REGEX = /^\.[a-z0-9]{1,10}$/i;
 
