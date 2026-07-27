@@ -839,9 +839,13 @@ export function createPlugin() {
 					}
 
 					if (body.mediaId) {
-						session.collected.photos = (session.collected.photos ?? []).filter((p) => p.mediaId !== body.mediaId);
-						await ctx.storage.sessions.put(sessionId, session);
-						await deletePhotoFromR2(body.mediaId);
+						const photos = session.collected.photos ?? [];
+						const owned = photos.some((p) => p.mediaId === body.mediaId);
+						if (owned) {
+							session.collected.photos = photos.filter((p) => p.mediaId !== body.mediaId);
+							await ctx.storage.sessions.put(sessionId, session);
+							await deletePhotoFromR2(body.mediaId);
+						}
 					}
 
 					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
