@@ -96,6 +96,8 @@ export interface PluginSettings {
 	youtubeTitlePrefix: string;
 	youtubeDailyCap: number;
 	youtubePublicPlaceholder: boolean;
+	turnstileSiteKey: string;
+	turnstileSecretKey: string;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -113,4 +115,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	youtubeTitlePrefix: "From the Shoebox",
 	youtubeDailyCap: 5,
 	youtubePublicPlaceholder: false,
+	turnstileSiteKey: "",
+	turnstileSecretKey: "",
 };

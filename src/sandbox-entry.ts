@@ -17,6 +17,7 @@ import type { VideoMeta } from "./video/youtube.js";
 import { hasQuota, incrementUsed } from "./video/quota.js";
 import { assertTransition } from "./video/state.js";
 import type { YoutubeTransfer } from "./video/types.js";
+import { verifyTurnstile } from "./turnstile.js";
 
 // ─── R2 media helpers ─────────────────────────────────────────────────────────
 // These are ephemeral staging objects, not permanent media-library assets:
@@ -713,6 +714,15 @@ export function createPlugin() {
 		},
 
 		routes: {
+			// ── Public: Turnstile site key for the widget ───────────────
+			"config/public": {
+				public: true,
+				handler: async (ctx: RouteContext) => {
+					const settings = await getSettings(ctx);
+					return { turnstileSiteKey: settings.turnstileSiteKey ?? "" };
+				},
+			},
+
 			// ── Public: Initialize session ──────────────────────────────
 			"form/init": {
 				public: true,
@@ -722,6 +732,12 @@ export function createPlugin() {
 					if (!settings.enabled) throw new PluginRouteError("SERVICE_UNAVAILABLE", "Submissions are temporarily closed.", 503);
 
 					const ip = getIP(ctx);
+					// Skip when no secret is configured (e.g. local dev) so dev still works.
+					if (settings.turnstileSecretKey) {
+						const body = ctx.input as { turnstileToken?: string };
+						const verified = await verifyTurnstile(body?.turnstileToken ?? "", settings.turnstileSecretKey, ctx, ip);
+						if (!verified) throw PluginRouteError.forbidden("Verification failed. Please refresh the page and try again.");
+					}
 					const sessionId = crypto.randomUUID();
 					const now = new Date().toISOString();
 					await ctx.storage.sessions.put(sessionId, {
@@ -1244,6 +1260,8 @@ export function createPlugin() {
 						youtubeDailyCap: s.youtubeDailyCap ?? 5,
 						youtubeTitlePrefix: s.youtubeTitlePrefix ?? "From the Shoebox",
 						youtubePublicPlaceholder: s.youtubePublicPlaceholder ?? false,
+						turnstileSiteKey: s.turnstileSiteKey ?? "",
+						turnstileSecretKey: s.turnstileSecretKey ? "••••••••" : "",
 					};
 				},
 			},
@@ -1270,6 +1288,8 @@ export function createPlugin() {
 						body.youtubeDailyCap != null ? ctx.kv.set("settings:youtubeDailyCap", Number(body.youtubeDailyCap)) : Promise.resolve(),
 						save("youtubeTitlePrefix", body.youtubeTitlePrefix),
 						save("youtubePublicPlaceholder", body.youtubePublicPlaceholder),
+						save("turnstileSiteKey", body.turnstileSiteKey),
+						save("turnstileSecretKey", body.turnstileSecretKey),
 					]);
 					return { ok: true };
 				},

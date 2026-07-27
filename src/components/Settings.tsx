@@ -17,6 +17,8 @@ interface SettingsValues {
 	youtubeDailyCap: number;
 	youtubeTitlePrefix: string;
 	youtubePublicPlaceholder: boolean;
+	turnstileSiteKey: string;
+	turnstileSecretKey: string;
 }
 
 const DEFAULTS: SettingsValues = {
@@ -33,6 +35,8 @@ const DEFAULTS: SettingsValues = {
 	youtubeDailyCap: 5,
 	youtubeTitlePrefix: "From the Shoebox",
 	youtubePublicPlaceholder: false,
+	turnstileSiteKey: "",
+	turnstileSecretKey: "",
 };
 
 export function Settings() {
@@ -97,6 +101,12 @@ export function Settings() {
 
 			<Section title="General">
 				<Toggle label="Plugin enabled" checked={values.enabled} onChange={(v) => set("enabled", v)} />
+			</Section>
+
+			<Section title="Anti-bot (Turnstile)">
+				<Field label="Turnstile site key (public)" value={values.turnstileSiteKey} onChange={(v) => set("turnstileSiteKey", v)} />
+				<Field label="Turnstile secret key" value={values.turnstileSecretKey} onChange={(v) => set("turnstileSecretKey", v)} secret
+					hint="Blank = anti-bot check is disabled (dev/local default). Cloudflare dashboard → Turnstile." />
 			</Section>
 
 			<Section title="Newsletter (Brevo)">
