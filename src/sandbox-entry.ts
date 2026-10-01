@@ -294,6 +294,52 @@ async function sendApprovalEmail(name: string, email: string, storyUrl: string, 
 	}
 }
 
+// Shared by chat/upload (base64) and chat/upload-bytes: size cap, magic-byte
+// sniff, per-session photo limit, R2 write, session update.
+async function savePhoto(
+	ctx: RouteContext,
+	settings: PluginSettings,
+	session: Session,
+	sessionId: string,
+	filename: string,
+	contentType: string,
+	bytes: Uint8Array,
+): Promise<{ ok: true; photo: Record<string, unknown>; sessionToken: string }> {
+	const maxBytes = (settings.maxFileSize ?? 10) * 1024 * 1024;
+	if (bytes.byteLength > maxBytes) {
+		throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
+	}
+
+	if (!sniffImageMagic(bytes.subarray(0, 12))) {
+		throw PluginRouteError.badRequest("That file doesn't look like a valid JPG, PNG, or WebP image.");
+	}
+
+	const currentPhotos = session.collected.photos ?? [];
+	if (currentPhotos.length >= (settings.maxPhotos ?? 5)) {
+		throw PluginRouteError.badRequest(`Maximum ${settings.maxPhotos ?? 5} photos per submission.`);
+	}
+
+	// Copy so the R2 write sees exactly the photo's bytes (a route-input view can
+	// sit inside a larger buffer).
+	const arrayBuffer = bytes.slice().buffer as ArrayBuffer;
+	const { storageKey: mediaId, url: photoUrl } = await uploadPhotoToR2(filename, contentType, arrayBuffer);
+
+	const photoData = {
+		mediaId,
+		url: photoUrl,
+		altTextFinal: "",
+		filename,
+		contentType,
+		sizeBytes: arrayBuffer.byteLength,
+	};
+
+	session.collected.photos = [...currentPhotos, photoData];
+	await ctx.storage.sessions.put(sessionId, session);
+
+	const newToken = await signSessionToken(sessionId, settings.sessionSecret);
+	return { ok: true, photo: photoData, sessionToken: newToken };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getIP(ctx: RouteContext): string {
@@ -326,12 +372,20 @@ function hostAllowed(value: string): boolean {
 	}
 }
 
+// Routes that declare `request.headers` get a plain lowercased header record
+// instead of a Headers object; accept both.
+function readHeader(request: unknown, name: string): string | null {
+	const h = (request as { headers: Headers | Record<string, string> }).headers;
+	if (typeof (h as Headers).get === "function") return (h as Headers).get(name);
+	return (h as Record<string, string>)[name.toLowerCase()] ?? null;
+}
+
 function validateOrigin(request: Request): boolean {
-	const origin = request.headers.get("Origin");
+	const origin = readHeader(request, "Origin");
 	if (origin) return hostAllowed(origin);
 	// No Origin header (rare for a POST fetch): fall back to Referer, parsed the
 	// same way. Never treat a missing Origin as automatically valid.
-	const referer = request.headers.get("Referer");
+	const referer = readHeader(request, "Referer");
 	if (referer) return hostAllowed(referer);
 	return false;
 }
@@ -494,7 +548,7 @@ async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: Plugin
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.4.1",
+		version: "1.5.0",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -808,37 +862,51 @@ export function createPlugin() {
 					} catch {
 						throw PluginRouteError.badRequest("Invalid image data. Please try uploading the photo again.");
 					}
-					const arrayBuffer = bytes.buffer as ArrayBuffer;
 
-					if (arrayBuffer.byteLength > maxBytes) {
-						throw PluginRouteError.badRequest(`File too large. Maximum size is ${settings.maxFileSize ?? 10}MB.`);
+					return savePhoto(ctx, settings, session, sessionId, body.filename, contentType, bytes);
+				},
+			},
+
+			// ── Public: Upload photo as raw bytes (no base64 overhead) ──
+			// Same checks as chat/upload; the client uses this for photos that fit
+			// the 8 MiB route cap and falls back to chat/upload (base64) above that.
+			// Session token, filename and content type travel in declared headers.
+			"chat/upload-bytes": {
+				public: true,
+				methods: ["POST" as const],
+				request: {
+					body: "bytes" as const,
+					maxBytes: 8 * 1024 * 1024,
+					headers: ["content-type", "origin", "referer", "x-session-token", "x-filename"],
+				},
+				handler: async (ctx: RouteContext) => {
+					if (!validateOrigin(ctx.request)) throw PluginRouteError.forbidden("Invalid origin");
+					const bytes = ctx.input instanceof Uint8Array ? ctx.input : null;
+					if (!bytes || bytes.byteLength === 0) throw PluginRouteError.badRequest("No file data provided");
+
+					let filename = "";
+					try {
+						filename = decodeURIComponent(readHeader(ctx.request, "x-filename") ?? "");
+					} catch {
+						throw PluginRouteError.badRequest("Invalid filename.");
+					}
+					if (!filename) throw PluginRouteError.badRequest("No filename provided");
+					filename = filename.slice(0, 255);
+
+					const contentType = (readHeader(ctx.request, "content-type") ?? "").split(";")[0]!.trim();
+					if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
+						throw PluginRouteError.badRequest("Only JPG, PNG, and WebP images are accepted.");
 					}
 
-					if (!sniffImageMagic(bytes.subarray(0, 12))) {
-						throw PluginRouteError.badRequest("That file doesn't look like a valid JPG, PNG, or WebP image.");
+					const settings = await getSettings(ctx);
+					const sessionId = await verifySessionToken(readHeader(ctx.request, "x-session-token") ?? "", settings.sessionSecret);
+					if (!sessionId) throw PluginRouteError.unauthorized("Session expired. Please refresh the page and try again.");
+					const session = await ctx.storage.sessions.get(sessionId) as Session | null;
+					if (!session || session.status !== "active") {
+						throw PluginRouteError.notFound("Session not found.");
 					}
 
-					const currentPhotos = session.collected.photos ?? [];
-					if (currentPhotos.length >= (settings.maxPhotos ?? 5)) {
-						throw PluginRouteError.badRequest(`Maximum ${settings.maxPhotos ?? 5} photos per submission.`);
-					}
-
-					const { storageKey: mediaId, url: photoUrl } = await uploadPhotoToR2(body.filename, contentType, arrayBuffer);
-
-					const photoData = {
-						mediaId,
-						url: photoUrl,
-						altTextFinal: "",
-						filename: body.filename,
-						contentType,
-						sizeBytes: arrayBuffer.byteLength,
-					};
-
-					session.collected.photos = [...currentPhotos, photoData];
-					await ctx.storage.sessions.put(sessionId, session);
-
-					const newToken = await signSessionToken(sessionId, settings.sessionSecret);
-					return { ok: true, photo: photoData, sessionToken: newToken };
+					return savePhoto(ctx, settings, session, sessionId, filename, contentType, bytes);
 				},
 			},
 
