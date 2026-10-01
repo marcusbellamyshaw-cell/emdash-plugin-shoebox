@@ -109,7 +109,23 @@ async function getSettings(ctx: PluginContext): Promise<PluginSettings> {
 			if (val !== null) (settings as Record<string, unknown>)[key] = val;
 		}),
 	);
+	// An unset session secret would make signSessionToken fall back to a hardcoded
+	// dev key (forgeable tokens). plugin:install generates one, but sites installed
+	// before that step existed never got it, so create one on first use.
+	if (!settings.sessionSecret) settings.sessionSecret = await ensureSessionSecret(ctx);
 	return settings;
+}
+
+async function ensureSessionSecret(ctx: PluginContext): Promise<string> {
+	const key = "settings:sessionSecret";
+	const current = await ctx.kv.getVersioned<string>(key);
+	if (current?.value) return current.value;
+	const generated = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+	// Create-if-absent / replace-the-empty-value, so concurrent first requests converge on one secret.
+	if ((await ctx.kv.compareAndSet(key, current?.revision ?? null, generated)).applied) return generated;
+	return (await ctx.kv.get<string>(key)) || generated;
 }
 
 // ─── Session token ────────────────────────────────────────────────────────────
@@ -548,7 +564,7 @@ async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: Plugin
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.5.0",
+		version: "1.5.1",
 		capabilities: [
 			"content:read",
 			"content:write",
