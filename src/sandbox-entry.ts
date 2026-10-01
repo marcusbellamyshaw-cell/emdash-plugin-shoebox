@@ -577,7 +577,7 @@ async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: Plugin
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.5.2",
+		version: "1.5.3",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -587,7 +587,7 @@ export function createPlugin() {
 			"network:request",
 			"hooks.page-fragments:register",
 		],
-		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com"],
+		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com", "challenges.cloudflare.com"],
 
 		storage: {
 			sessions: { indexes: ["ip", "status", "createdAt", ["ip", "status"]] },
