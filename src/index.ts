@@ -5,7 +5,7 @@ export { createPlugin } from "./sandbox-entry.js";
 export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
-		version: "1.5.1",
+		version: "1.5.2",
 		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [

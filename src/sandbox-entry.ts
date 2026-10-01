@@ -63,6 +63,19 @@ async function getMediaBucket(): Promise<R2BucketMinimal | null> {
 	}
 }
 
+// The plugin setting wins; otherwise fall back to the site-wide TURNSTILE_SECRET
+// Worker secret (the same widget the newsletter forms use), so the form is
+// protected without pasting a second copy of the secret into settings.
+async function getTurnstileSecret(settings: PluginSettings): Promise<string> {
+	if (settings.turnstileSecretKey) return settings.turnstileSecretKey;
+	try {
+		const { env } = await import(/* @vite-ignore */ _CF_WORKERS) as { env: Record<string, unknown> };
+		return String(env["TURNSTILE_SECRET"] ?? "");
+	} catch {
+		return "";
+	}
+}
+
 async function getMediaMultipart(): Promise<R2MultipartBinding | null> {
 	const bucket = await getMediaBucket();
 	return (bucket as unknown as R2MultipartBinding | null) ?? null;
@@ -564,7 +577,7 @@ async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: Plugin
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.5.1",
+		version: "1.5.2",
 		capabilities: [
 			"content:read",
 			"content:write",
@@ -807,9 +820,10 @@ export function createPlugin() {
 
 					const ip = getIP(ctx);
 					// Skip when no secret is configured (e.g. local dev) so dev still works.
-					if (settings.turnstileSecretKey) {
+					const turnstileSecret = await getTurnstileSecret(settings);
+					if (turnstileSecret) {
 						const body = ctx.input as { turnstileToken?: string };
-						const verified = await verifyTurnstile(body?.turnstileToken ?? "", settings.turnstileSecretKey, ctx, ip);
+						const verified = await verifyTurnstile(body?.turnstileToken ?? "", turnstileSecret, ctx, ip);
 						if (!verified) throw PluginRouteError.forbidden("Verification failed. Please refresh the page and try again.");
 					}
 					const sessionId = crypto.randomUUID();
