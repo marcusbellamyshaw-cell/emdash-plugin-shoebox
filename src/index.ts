@@ -5,16 +5,13 @@ export { createPlugin } from "./sandbox-entry.js";
 export function shoeboxPlugin(): PluginDescriptor {
 	return {
 		id: "ebt-shoebox",
-		version: "1.3.0",
+		version: "1.4.1",
 		entrypoint: "emdash-plugin-shoebox",
 		options: {},
 		capabilities: [
 			"content:read",
 			"content:write",
-			"media:read",
-			"media:write",
 			"network:request",
-			"email:send",
 			"hooks.page-fragments:register",
 		],
 		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com", "challenges.cloudflare.com"],

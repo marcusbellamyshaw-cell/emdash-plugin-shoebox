@@ -183,17 +183,21 @@ async function checkSubmissionRateLimit(ip: string, settings: PluginSettings, ct
 /**
  * KV-based per-IP daily counter for video/init. Returns the new count after
  * increment, or null if the limit would be exceeded (caller should reject).
- * Uses the same read-modify-write pattern as incrementUsed() in quota.ts.
+ * Compare-and-set so parallel init requests can't all read the same count and
+ * slip past the cap.
  */
 async function incrementVideoInitCounter(ip: string, settings: PluginSettings, ctx: PluginContext): Promise<number | null> {
 	const today = new Date().toISOString().slice(0, 10);
 	const key = `video-init:${ip}:${today}`;
 	const max = settings.maxSubmissionsPerIp ?? 3;
-	const current = (await ctx.kv.get<number>(key)) ?? 0;
-	if (current >= max) return null;
-	const next = current + 1;
-	await ctx.kv.set(key, next);
-	return next;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const cur = await ctx.kv.getVersioned<number>(key);
+		const current = cur?.value ?? 0;
+		if (current >= max) return null;
+		const next = current + 1;
+		if ((await ctx.kv.compareAndSet(key, cur?.revision ?? null, next)).applied) return next;
+	}
+	return null; // too contended: fail closed rather than let a burst past the cap
 }
 
 // ─── Newsletter ───────────────────────────────────────────────────────────────
@@ -485,17 +489,14 @@ async function cleanupSubmissionAssets(submission: SubmissionRecord, ctx: Plugin
 export function createPlugin() {
 	return definePlugin({
 		id: "ebt-shoebox",
-		version: "1.3.0",
+		version: "1.4.1",
 		capabilities: [
 			"content:read",
 			"content:write",
-			"media:read",
-			"media:write",
 			// Only api.brevo.com is ever fetched (R2 is reached via the MEDIA
 			// Worker binding, not HTTP), so an explicit allowlist replaces the
 			// previous network:request:unrestricted grant.
 			"network:request",
-			"email:send",
 			"hooks.page-fragments:register",
 		],
 		allowedHosts: ["api.brevo.com", "oauth2.googleapis.com", "www.googleapis.com", "upload.googleapis.com"],
