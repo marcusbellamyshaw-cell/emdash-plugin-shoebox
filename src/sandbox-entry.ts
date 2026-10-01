@@ -7,6 +7,7 @@ import type {
 	PluginSettings,
 } from "./types.js";
 import { DEFAULT_SETTINGS } from "./types.js";
+import { buildSettingsSchema, ensureSecretsEncrypted } from "./secrets.js";
 import { R2_PART_SIZE, partCount, nextYoutubeChunk } from "./video/chunking.js";
 import { isAllowedVideoType, withinSizeCap, sniffVideoMagic, sniffImageMagic, MIN_VIDEO_BYTES } from "./video/validation.js";
 import { videoKey, readRange } from "./video/r2.js";
@@ -95,7 +96,11 @@ async function deletePhotoFromR2(storageKey: string): Promise<void> {
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 
+// Stored encrypted at rest (needs EMDASH_ENCRYPTION_KEY); see secrets.ts.
+const SECRET_KEYS = ["brevoApiKey", "sessionSecret", "turnstileSecretKey"] as const;
+
 async function getSettings(ctx: PluginContext): Promise<PluginSettings> {
+	await ensureSecretsEncrypted(ctx, SECRET_KEYS);
 	const keys = Object.keys(DEFAULT_SETTINGS) as (keyof PluginSettings)[];
 	const settings = { ...DEFAULT_SETTINGS };
 	await Promise.all(
@@ -514,12 +519,10 @@ export function createPlugin() {
 				// "Review Submissions" queue removed — submissions are reviewed and published in Content → Community Submissions; publishing is the approval (see content:afterPublish).
 			],
 			widgets: [{ id: "shoebox-stats", title: "Shoebox Submissions", size: "third" }],
-			// No settingsSchema: the custom "/settings" page (Settings.tsx) is the
-			// single source of truth for configuration. emdash only renders the
-			// auto-form when no custom settings page exists, so declaring both here
-			// duplicated the field list and let them drift (the v1.2.0 bug, where a
-			// schema field never appeared in the custom form). Matches the first-party
-			// plugin-webhook-notifier convention (custom page, no settingsSchema).
+			// Generated from DEFAULT_SETTINGS (so it can't drift from Settings.tsx, the v1.2.0
+			// bug) purely to mark secrets for at-rest encryption. The custom "/settings" page
+			// stays the only UI: core skips the auto-form when a custom page exists.
+			settingsSchema: buildSettingsSchema(DEFAULT_SETTINGS, SECRET_KEYS),
 		},
 
 		hooks: {
